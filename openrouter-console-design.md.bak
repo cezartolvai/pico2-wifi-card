@@ -1,0 +1,221 @@
+
+Management Console
+
+The management console is the configuration front end, on the first CDC-ACM serial function (commonly /dev/ttyACM0). It is reachable as soon as the device enumerates, before Wi-Fi is associated, so provisioning never requires a network.
+
+Open it with a serial terminal such as picocom or screen; the baud rate is irrelevant for USB CDC. The console echoes input and shows a prompt, and every command prints the full device state. Wi-Fi authentication is either WPA2-PSK or WPA3-SAE (AES). The password is the network’s passphrase or open when the password is left blank. A password-protected profile uses WPA2/WPA3 transition mode, so it joins either kind of access point.
+
+The console stores up to eight credential profiles; one is the active profile, and the device associates with it. set ssid/set pass edit the active profile, list/use/del manage the set, and scan discovers nearby networks and joins one from a numbered list — handy when an SSID has characters that are awkward to type. Command words are case-insensitive; the console shows them in lower case. The session here provisions a network by scanning for it.
+Provisioning Over The Management Console
+
+$ picocom /dev/ttyACM0
+
+-- pico-usb-wifi v1.1.0 --
+    profiles:   0 saved (active: none)
+    ssid:       (unset)
+    pass:       unset
+    country:    (unset)
+    debug:      off
+    status:     associating
+    host IPv4:  (not seen yet)
+(set|scan|list|use|save) # scan
+[*] scanning...
+    networks (3):
+       1  MyNetwork             -47 dBm  a4:b1:c2:d3:e4:f5
+       2  CoffeeShop            -68 dBm  00:11:22:33:44:55
+       3  Neighbour             -81 dBm  9c:65:ee:ef:27:c7
+(back|join|scan|live) # join 1
+[*] staged -- set pass <password> then save
+...
+    profiles:   1 saved (active: 1)
+    ssid:       MyNetwork
+    pass:       unset
+...
+(set|scan|list|use|save) # set pass hunter2
+[*] applying -- re-associating
+...
+(set|scan|list|use|save) # save
+[*] saved to flash
+...
+
+A change takes effect immediately, re-associating with the active profile; a reboot is not required. Repeat to save more networks; list shows them and use <n> switches the active one:
+Managing Saved Profiles
+
+(set|scan|list|use|save) # list
+    profiles (2/8):
+      1* MyNetwork
+      2  CoffeeShop  (open)
+    (* = active)
+(set|scan|list|use|save) # use 2
+[*] applying -- re-associating
+...
+
+save persists every profile to flash; restore discards unsaved edits by reloading the saved record. The table here lists the command set.
+Table 1. Management-Console Commands
+Command 	Effect
+
+set ssid <text>
+	
+
+Set the active profile’s SSID (a value may contain spaces) and re-associate; creates the first profile if none exists.
+
+set pass <text>
+	
+
+Set the active profile’s WPA2/WPA3 passphrase (blank for an open network) and re-associate.
+
+set country <CC|WORLDWIDE>
+	
+
+Set the regulatory country (fully applied on the next boot).
+
+set debug <on|off>
+	
+
+Stream diagnostics on the debug console; see Debug Console.
+
+list
+	
+
+List the saved profiles, marking the active one.
+
+use <n>
+	
+
+Make profile n active and re-associate.
+
+del <n>
+	
+
+Delete profile n.
+
+scan
+	
+
+Scan for nearby networks and enter the scan submenu (back, join <n>, scan to repeat, or live for a continuous disassociated stream). join stages the chosen network as the active profile, ready for set pass.
+
+save
+	
+
+Persist all profiles and settings to flash.
+
+restore
+	
+
+Discard unsaved changes by reloading the saved settings.
+
+The host’s assigned address is shown in the state dump as host IPv4 and host IPv6, snooped passively from the bridged traffic, since the Pico holds no address to report.
+
+The configuration sector lives at the end of flash, separate from the program image at the start, so an ordinary pico-usb-wifi.uf2 reflash leaves saved profiles intact (a full-chip erase clears them). The exception is upgrading to v1.1.0: the record layout changed to hold multiple profiles, so a pre-1.1.0 record is discarded and the networks must be re-entered once (see the changelog).
+Debug Console
+
+The debug console is a write-only diagnostics stream on the second CDC-ACM serial function (commonly /dev/ttyACM1). It is silent until set debug on is issued on the management console, so it has no cost when off and never interferes with management.
+
+When enabled, it reports association changes and a periodic bridge-statistics line, as in the session here. A -DTRACE_FRAMES=1 build adds a one-line summary of each bridged frame, but it floods the console under load, so it is off by default.
+A Debug-Console Session
+
+$ picocom /dev/ttyACM1
+associated to MyNetwork
+stats: ->wifi=128 ->host=341 txdrop=0 rxdrop=0 refl=12 poolfail=0 ringpk=4 link=up hangs=0 faults=0 faultpc=0x00000000 freeram=152024 host=192.168.1.218
+stats: ->wifi=143 ->host=372 txdrop=0 rxdrop=0 refl=14 poolfail=0 ringpk=3 link=up hangs=0 faults=0 faultpc=0x00000000 freeram=152024 host=192.168.1.218
+
+The statistics fields are described in the table here.
+Table 2. Debug Statistics Fields
+Field 	Meaning
+
+→wifi
+	
+
+Frames forwarded from the host to Wi-Fi.
+
+→host
+	
+
+Frames forwarded from Wi-Fi to the host.
+
+txdrop
+	
+
+Host-to-Wi-Fi frames dropped because the station was not yet associated (the host retries).
+
+rxdrop
+	
+
+Wi-Fi-to-host frames dropped because the USB side could not drain fast enough.
+
+refl
+	
+
+Wi-Fi-to-host frames dropped because they were the host’s own transmission, reflected by the access point.
+
+poolfail
+	
+
+Host-to-Wi-Fi frames dropped because the lwIP pbuf pool was momentarily exhausted.
+
+ringpk
+	
+
+Peak Wi-Fi-to-host USB-TX queue depth (out of 32) since the previous stats line, then reset — a live gauge, where a value near 32 means USB cannot drain as fast as Wi-Fi delivers. (Unlike an all-time maximum, it falls again once a burst passes.)
+
+link
+	
+
+Station Wi-Fi link status: up (associated), join/down (associating), or a failure reason — badauth (wrong passphrase), nonet (SSID not found), fail.
+
+hangs
+	
+
+Times the watchdog has recovered the firmware from a hang since the last cold power-on; see Automatic Recovery.
+
+faults
+	
+
+Hard faults the firmware has recovered from since the last cold power-on.
+
+faultpc
+	
+
+Address of the most recent hard fault (0x00000000 if none), for mapping with addr2line.
+
+freeram
+	
+
+Free RAM in bytes, for gauging headroom when tuning buffer sizes.
+
+Per-frame tracing shares the USB Full-Speed link with the bridged traffic, so it both reduces throughput and floods the console; it is a build-time option (-DTRACE_FRAMES=1) intended only for deep debugging.
+Automatic Recovery
+
+A hardware watchdog reboots the device if the firmware ever stops servicing its main loop - a lockup or driver deadlock - so it re-enumerates on its own within a few seconds instead of needing to be unplugged. A separate hard-fault handler catches a CPU fault immediately and records the faulting address.
+
+The bridge counters from just before the crash survive the reboot in uninitialised RAM. On recovery the device prints a one-line RECOVERED from …​ report on the debug console with those counters (and the faulting address for a hard fault), and the running stats: line carries hangs, faults, and faultpc tallies, so a crash leaves a diagnostic trace even though it cleared itself.
+Onboard LED States
+
+The table here lists the onboard LED patterns and their meaning.
+Table 3. Onboard LED Patterns
+Pattern 	Meaning
+
+Solid
+	
+
+Associated with an access point - the normal running state.
+
+Slow blink - 1 Hz
+	
+
+Wi-Fi configured, associating or not yet associated.
+
+Fast blink - 5 Hz
+	
+
+No Wi-Fi configured; provision it over the management console.
+
+Double flash - two quick pulses, then a pause
+	
+
+Live (continuous) scan running; the device is disassociated and streaming nearby access points to the management console until a key is pressed.
+
+Off
+	
+
+USB not ready.

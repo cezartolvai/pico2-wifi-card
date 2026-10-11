@@ -1,0 +1,22 @@
+# Repo-ul nu este încă git-managed; fișierul e pregătit pentru când devine.
+# (vezi .clinerules/04-security.md - credențialele nu se comită)
+
+build/
+# Directoare de build secundare, folosite pentru verificări (build-usbonly,
+# build-trace, ...). Nu sunt cod sursă și se regenerează din CMake.
+build-*/
+CMakeCache.txt
+CMakeFiles/
+*.uf2
+*.elf
+*.elf.map
+*.bin
+
+# SDK-ul vendorat (100+ MB) nu se comită
+.pico-sdk/
+
+# Fișiere locale de credențiale - nu se comită niciodată
+credentials.cmake
+bridge-credentials.cmake
+*.local.cmake
+.env
