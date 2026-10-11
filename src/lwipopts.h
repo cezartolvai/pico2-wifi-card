@@ -18,6 +18,12 @@
 #define LWIP_SINGLE_NETIF               0
 #define NETIF_MAX_NETIF                 3
 
+/* src/config.h carries BRIDGE_L2_BRIDGE, which decides whether lwIP routes at
+ * all.  It is a plain macro file with no includes of its own, so pulling it in
+ * here is safe and keeps the two halves of the switch in one place. */
+#include "config.h"
+
+#if !BRIDGE_L2_BRIDGE
 /* Routing: forwarding between the two interfaces, decided by the source
  * address (see bridge_hooks.h / bridge.c). */
 #define IP_FORWARD                      1
@@ -26,6 +32,7 @@
 #define IP_OPTIONS_ALLOWED              0
 #define IP_TTL                          64
 #define LWIP_HOOK_FILENAME              "bridge_hooks.h"
+#endif
 
 /*
  * lwIP's own asserts go through LWIP_PLATFORM_ASSERT.  pico's default is
@@ -44,9 +51,17 @@ void diagnostics_lwip_assert(const char *msg);
  * real function only if LWIP_HOOK_IP4_ROUTE_SRC is already defined at that
  * point.  So the hook macros have to be visible from lwipopts.h onwards;
  * bridge_hooks.h supplies the prototypes.
+ *
+ * In the transparent L2 build these two hooks do not exist: frames are forwarded
+ * at the Ethernet level and never reach ip4_input()/ip4_route_src().  Declaring
+ * the hooks anyway would make lwIP call symbols that src/bridge.c deliberately
+ * did not compile, and the link fails with "undefined reference to
+ * bridge_hook_route_src".  So the hook macros are defined only for the L3 build.
  */
+#if !BRIDGE_L2_BRIDGE
 #define LWIP_HOOK_IP4_INPUT(p, inp)         bridge_hook_ip4_input((p), (inp))
 #define LWIP_HOOK_IP4_ROUTE_SRC(src, dest)  bridge_hook_route_src((src), (dest))
+#endif
 
 /* Interfaces */
 #define LWIP_NETIF_HOSTNAME             1

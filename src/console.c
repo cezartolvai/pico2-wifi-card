@@ -765,6 +765,30 @@ static const char *country_word(void)
 
 void console_dump_state(void)
 {
+#if BRIDGE_L2_BRIDGE
+    /* A transparent bridge leases nothing and translates nothing, so there is no
+     * pool and no flow table to report.  Saying so is the honest form: printing
+     * "nat: 0/64 flows" would describe a bridge this build does not contain. */
+    console_printf(ITF_MGMT,
+                   "    profiles:   %u saved (active: %s)\n"
+                   "    ssid:       %s\n"
+                   "    pass:       %s\n"
+                   "    country:    %s\n"
+                   "    debug:      %s\n"
+                   "    status:     %s\n"
+                   "    wifi IPv4:  %s  gw %s\n"
+                   "    host IPv4:  %s\n"
+                   "    host IPv6:  %s\n"
+                   "    mode:       transparent L2 bridge (no NAT, no lease)\n",
+                   (unsigned)bridge_settings.count,
+                   (bridge_settings.active == BRIDGE_NO_PROFILE) ? "none" : "active",
+                   ssid_word(), pass_word(), country_word(),
+                   bridge_settings.debug ? "on" : "off",
+                   bridge_status_word(),
+                   bridge_wifi_ipv4_word(), bridge_wifi_gateway_word(),
+                   bridge_host_ipv4_word(),
+                   "(ipv6 off)");
+#else
     console_printf(ITF_MGMT,
                    "    profiles:   %u saved (active: %s)\n"
                    "    ssid:       %s\n"
@@ -792,8 +816,9 @@ void console_dump_state(void)
                     * is no IPv6 address to snoop for either side. */
                    "(ipv6 off)",
                    bridge_nat_active(), BRIDGE_NAT_TABLE_SIZE);
-
+#endif
 }
+
 
 static void console_banner(void)
 {

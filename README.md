@@ -13,17 +13,27 @@ your NIC     L2 bridge      your home network
 **Target: a network card, not a router.** Recorded in
 `.clinerules/00-requirements-baseline.md` ("Decizii consemnate", 2026-10-09).
 
-**What is built today is different.** Today's `src/` is an L3 router: one lwIP stack
-holding two interfaces, `IP_FORWARD`, a TinyUSB DHCP server and source NAT.
+**`src/` now holds both data paths, and `src/config.h` picks one at build time.**
+`BRIDGE_L2_BRIDGE` (in `src/config.h`, default `0`) picks which data path is compiled:
 
-| netif | what it is today                | address                        |
-|-------|------------------------------|--------------------------------|
-| `u1`  | TinyUSB CDC-NCM, the host's NIC | `172.28.0.1` (gateway)         |
-| `w0`  | CYW43 Wi-Fi station             | leased by your router (DHCP)   |
+- `BRIDGE_L2_BRIDGE = 0` — the default, and what `build/` and the flashed board contain today:
+  an L3 router. One lwIP stack holding two interfaces, `IP_FORWARD`, a TinyUSB DHCP server and
+  source NAT.
+- `BRIDGE_L2_BRIDGE = 1` — the transparent bridge the requirements ask for: Ethernet frames
+  forwarded between the two ports, the host adopting the station's MAC, the station's own DHCP
+  client stopped, no NAT, no private subnet, no Pico-side lease. **Built and checked at the
+  symbol level; not yet flashed or hardware-tested.**
 
-The host is leased `172.28.0.10` - `172.28.0.17` by TinyUSB's DHCP server, and
-its traffic is source-NATed onto the Wi-Fi address by `src/nat.c`. That is the
-gap to close, not a second product.
+| netif | `BRIDGE_L2_BRIDGE = 0` (today) | `BRIDGE_L2_BRIDGE = 1` |
+|-------|--------------------------------|------------------------|
+| `u1`  | TinyUSB CDC-NCM, `172.28.0.1` gateway, leases the host `172.28.0.10-17` | TinyUSB CDC-NCM, **no address at all**; the host takes its own lease from your router |
+| `w0`  | CYW43 station, leased by your router, `output = bridge_nat_output` | CYW43 station, **no address of its own** (its own DHCP client is stopped) |
+
+```sh
+cmake -S . -B build-l2 -G Ninja -DPICO_SDK_PATH=$PWD/.pico-sdk -DBRIDGE_L2_BRIDGE=1
+ninja -C build-l2
+```
+
 
 ## Requirements reference vs. what is built today
 
@@ -33,11 +43,12 @@ that reference.
 
 | Requirement (reference image) | Today in `src/` |
 |-------------------------------|-----------------|
-| Transparent L2 bridging | routed L3: `IP_FORWARD = 1` + `LWIP_HOOK_IP4_ROUTE_SRC` |
-| One MAC & one IP (the host adopts the Pico's Wi-Fi MAC) | two netifs, two MACs; the USB MAC is derived from the board ID |
-| No NAT, no port-forwards | NAT is on (`src/nat.c`, external ports from 50000) |
-| No private subnet | `172.28.0.0/24` with an 8-address DHCP pool |
-| IPv4 & IPv6 | IPv4 only (`LWIP_IPV6 = 0`) |
+| Transparent L2 bridging | in code, behind `-DBRIDGE_L2_BRIDGE=1`: `bridge_l2_forward()` hands each frame to the other port's `linkoutput`, and `IP_FORWARD` / both lwIP hooks are not defined in that build. The default build (`build/`, the flashed board) is still routed L3. **Not flashed, not hardware-tested** |
+| One MAC & one IP (the host adopts the Pico's Wi-Fi MAC) | in code, in the L2 build: `bridge_init_mac()` copies `w0->hwaddr` into `tud_network_mac_address`, and `bridge_init()` brings cyw43 up **before** `tusb_init()` so the descriptor carries it. The default build still uses a board-ID MAC (`02:ce:50:d8:db:52`) |
+| No NAT, no port-forwards | in code, in the L2 build: `BRIDGE_NAT_ENABLE` defaults to 0 there and `nat.c` contributes no symbols. The default build still runs NAT (`src/nat.c`, external ports from 50000) |
+| No private subnet | in code, in the L2 build: `u1` is added with no address, TinyUSB's DHCP server is not compiled, and the console prints `mode: transparent L2 bridge (no NAT, no lease)`. The default build is still `172.28.0.0/24` with an 8-address pool |
+| IPv4 & IPv6 | IPv4 only in both builds (`LWIP_IPV6 = 0`) |
+
 | WPA2-PSK & WPA3-SAE | in code: a profile with a passphrase joins in transition mode, `CYW43_AUTH_WPA3_WPA2_AES_PSK` (`bridge_profile_auth()`). Never associated with a real AP yet |
 | Management console on `/dev/ttyACM0`, debug console on `/dev/ttyACM1` | **measured on hardware** (2026-10-10): `CFG_TUD_CDC = 2`, six interfaces in the descriptor, REPL on `ttyACM0`, `ttyACM1` silent until `set debug on` and then carrying the `stats:` line |
 | Runtime provisioning: profiles, `scan`/`join`/`save`, saved to flash | in code: 8 profiles, `cyw43_wifi_scan()`, settings in the last flash sector (magic + version + CRC32). Not yet exercised: the flashed board has 0 saved profiles |
@@ -127,11 +138,23 @@ ninja -C build-trace
 # self-test: a `test` verb on the console, to cause and watch a recovery
 cmake -S . -B build-selftest -G Ninja -DPICO_SDK_PATH=$PWD/.pico-sdk -DBRIDGE_SELFTEST=1
 ninja -C build-selftest
+
+# transparent L2 bridge: no NAT, no private subnet, host adopts the station MAC
+cmake -S . -B build-l2 -G Ninja -DPICO_SDK_PATH=$PWD/.pico-sdk -DBRIDGE_L2_BRIDGE=1
+ninja -C build-l2
 ```
 
 `build-usbonly` is the artifact for step 5 of the debugging order in
 `.clinerules/03-build-and-test.md`: if DHCP works with that image, the USB path is fine and
 the fault is on the cyw43 / lwIP timing side. Neither variant has been flashed.
+
+`build-l2` is the transparent bridge the requirements ask for. It builds clean and is separate
+from the reference image at the symbol level (`build-l2` has `bridge_l2_usb_input` /
+`bridge_l2_wifi_input` and zero `bridge_hook_*`, `bridge_nat_*`, `nat_*` or `dhserv_init`
+symbols; `build/` has the hooks and zero `bridge_l2_*`). **It has not been flashed**: flashing a
+`uf2` destroys the saved Wi-Fi profile on this board, and without a profile there is no uplink
+to bridge. See `.clinerules/03-build-and-test.md` ("`build-l2`").
+
 
 `build-selftest` is the image the recovery checks were run on. `BRIDGE_SELFTEST` is 0 in
 `src/config.h` and no shipped build turns it on: `build/` contains no `cmd_test`, no

@@ -50,6 +50,7 @@ target_link_libraries(pico2_wifi_card PRIVATE
 # nothing and the image keeps the placeholder from config.h.
 set(BRIDGE_KNOBS
     BRIDGE_WIFI_ENABLE
+    BRIDGE_L2_BRIDGE
     BRIDGE_WIFI_SSID
     BRIDGE_WIFI_PASSWORD
     BRIDGE_WIFI_AUTH

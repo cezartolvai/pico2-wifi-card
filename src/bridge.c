@@ -1,12 +1,21 @@
 /* ---------------------------------------------------------------------------
  * bridge.c - one lwIP stack, two network interfaces.
  *
- *   w0 - CYW43 Wi-Fi station, address leased by your router
+ *   w0 - CYW43 Wi-Fi station, on your Wi-Fi network
  *   u1 - TinyUSB CDC-NCM, the interface the USB host sees
  *
- * lwIP's IP_FORWARD plus the LWIP_HOOK_IP4_ROUTE_SRC hook move packets between
- * the two interfaces; nat.c rewrites addresses on the way out so a whole
- * private network fits behind the single Wi-Fi address.
+ * Two data paths live in this file and src/config.h picks one at build time:
+ *
+ *   BRIDGE_L2_BRIDGE 0 - lwIP terminates IP on both interfaces and routes
+ *   between them (IP_FORWARD + LWIP_HOOK_IP4_ROUTE_SRC + a private network
+ *   leased to the host + source NAT out of w0).  See nat.c and bridge_hooks.h.
+ *
+ *   BRIDGE_L2_BRIDGE 1 - the Pico forwards Ethernet frames: what a frame from
+ *   the host looks like on the way in is what leaves on w0, and what the access
+ *   point delivers goes straight back out to the host.  The host adopts the
+ *   station's MAC and takes the router's own lease; the Pico holds no address.
+ *   That path is the "bridge_l2_*" section below and it uses none of the hooks,
+ *   none of nat.c and no DHCP server.
  * ------------------------------------------------------------------------ */
 #include <stdio.h>
 #include <string.h>
@@ -17,12 +26,14 @@
 
 #include "tusb.h"
 
+#include "lwip/dhcp.h"
 #include "lwip/dns.h"
 #include "lwip/ip4.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/inet_chksum.h"
 #include "lwip/netif.h"
 #include "lwip/pbuf.h"
+#include "lwip/prot/ethernet.h"
 #include "lwip/prot/icmp.h"
 #include "lwip/prot/ip.h"
 #include "lwip/prot/ip4.h"
@@ -30,6 +41,7 @@
 #include "lwip/prot/udp.h"
 #include "lwip/timeouts.h"
 #include "netif/etharp.h"
+#include "lwip/etharp.h"
 #include "netif/ethernet.h"
 
 #include "dhserver.h"
@@ -81,8 +93,20 @@ struct netif *bridge_wifi_netif(void)
 bool bridge_wifi_ready(void)
 {
     struct netif *wn = bridge_wifi_netif();
-    return (wn != NULL) && netif_is_up(wn) && netif_is_link_up(wn) &&
+
+    if (wn == NULL) {
+        return false;
+    }
+#if BRIDGE_L2_BRIDGE
+    /* A bridged station is ready when it is associated.  It has no address
+     * because the bridge holds none - the address on the network belongs to the
+     * host - so asking w0 for an IP address here would report "not ready" on a
+     * bridge that is working perfectly. */
+    return netif_is_up(wn) && netif_is_link_up(wn);
+#else
+    return netif_is_up(wn) && netif_is_link_up(wn) &&
            !ip4_addr_isany_val(*netif_ip4_addr(wn));
+#endif
 }
 
 bool bridge_usb_ready(void)
@@ -408,6 +432,13 @@ void bridge_checksum_fixup(struct pbuf *p)
 
 /* ------------------------------ lwIP hooks ------------------------------- */
 /*
+ * These two exist only for the L3 path.  When the Pico forwards Ethernet frames
+ * there is no IP routing decision to override, so lwipopts.h does not even set
+ * LWIP_HOOK_FILENAME and lwIP never calls them; keeping them out of the build
+ * as well keeps the image honest about which bridge it contains.
+ */
+#if !BRIDGE_L2_BRIDGE
+/*
  * LWIP_HOOK_IP4_ROUTE_SRC is asked "which interface does a packet with this
  * source address leave on?".  Returning NULL lets lwIP fall back to its own
  * idea, which is simply the default netif (the Wi-Fi one, set by cyw43).
@@ -493,6 +524,10 @@ int bridge_hook_ip4_input(struct pbuf *p, struct netif *inp)
      * network can only be the access point bouncing the host's own transmission
      * back.  Forwarding it would push it straight out the way it came, so it is
      * counted and dropped. */
+    /* refl: a frame that arrived on Wi-Fi carrying an address from the USB-side
+     * network can only be the access point bouncing the host's own transmission
+     * back.  Forwarding it would push it straight out the way it came, so it is
+     * counted and dropped. */
     {
         struct ip_hdr *iphdr = (struct ip_hdr *)p->payload;
         ip4_addr_t src;
@@ -509,9 +544,170 @@ int bridge_hook_ip4_input(struct pbuf *p, struct netif *inp)
     bridge_nat_unnat(inp, p, (struct ip_hdr *)p->payload);
     return 0;
 }
+#endif /* !BRIDGE_L2_BRIDGE: the hooks belong to the L3 path only */
+
+
+/* ------------------------- transparent L2 forwarding ----------------------- */
+#if BRIDGE_L2_BRIDGE
+
+/* The address the host actually uses, read off the frames it sends.  In this
+ * build the Pico holds no address of its own, so this is the only address the
+ * console can honestly report (see bridge_host_ipv4_word()). */
+static void bridge_l2_snoop_host(struct pbuf *p)
+{
+    uint8_t raw[SIZEOF_ETH_HDR + IP_HLEN];
+
+    if (p->tot_len < (SIZEOF_ETH_HDR + IP_HLEN)) {
+        return;                     /* ARP, IPv6, mDNS: no IPv4 address to read */
+    }
+    if (pbuf_copy_partial(p, raw, (u16_t)sizeof(raw), 0) !=
+        (u16_t)(SIZEOF_ETH_HDR + IP_HLEN)) {
+        return;
+    }
+    if (((uint16_t)((raw[12] << 8) | raw[13])) != ETHTYPE_IP) {
+        return;
+    }
+
+    /* struct ip_hdr keeps its addresses packed; read them octet by octet and
+     * rebuild one with IP4_ADDR() rather than taking the address of a member. */
+    ip4_addr_t src;
+    IP4_ADDR(&src, raw[SIZEOF_ETH_HDR + 12], raw[SIZEOF_ETH_HDR + 13],
+             raw[SIZEOF_ETH_HDR + 14], raw[SIZEOF_ETH_HDR + 15]);
+    if (!ip4_addr_isany_val(src)) {
+        host_ipv4 = src;
+        host_ipv4_seen = true;
+    }
+}
+/*
+ * One Ethernet frame in, one Ethernet frame out on the other interface.
+ *
+ * There is no IP decision here and nothing that can run out: no routing table,
+ * no address translation, no table of flows.  A frame from the host leaves on
+ * the Wi-Fi interface with its source MAC unchanged - which is the whole point
+ * of the host adopting the station's MAC - and a frame the access point
+ * delivers goes back out to the host unchanged.  The host is then a station on
+ * your Wi-Fi network with the router's own address, not a host behind the Pico.
+ *
+ * Ownership, because this is where a double free would hide:
+ *   - a pbuf passed to netif->linkoutput() is still ours afterwards (lwIP's own
+ *     callers, etharp_output() and ethernet_output(), free it themselves), so
+ *     every branch below frees it exactly once;
+ *     lwIP's ethernet_input() would have consumed one passed to it, which is
+ *     why these input functions return ERR_OK after freeing rather than letting
+ *     the caller free it a second time.
+ */
+static void bridge_l2_forward(struct netif *from, struct pbuf *p)
+{
+    struct netif *wn = bridge_wifi_netif();
+    struct netif *to;
+
+    if (p->tot_len < SIZEOF_ETH_HDR) {
+        bridge_stats.usb_rx_drop++;      /* not an Ethernet frame: refuse it */
+        pbuf_free(p);
+        return;
+    }
+
+    if (wn == NULL) {
+        bridge_stats.no_route++;
+        pbuf_free(p);
+        return;
+    }
+
+    if (from == &bridge_usb_netif) {
+        /* txdrop, in the sense table 2 uses it: the host sent a frame and the
+         * station was not associated yet, so there is nowhere for it to go.
+         * The host retransmits; nothing here has to remember anything. */
+        if (!netif_is_link_up(wn)) {
+            bridge_stats.no_route++;
+            pbuf_free(p);
+            return;
+        }
+        to = wn;
+    } else {
+        if (!bridge_usb_ready()) {
+            bridge_stats.usb_tx_drop++;
+            pbuf_free(p);
+            return;
+        }
+        to = &bridge_usb_netif;
+    }
+
+    if (to->linkoutput == NULL) {
+        if (to == wn) {
+            bridge_stats.wifi_drop++;
+        } else {
+            bridge_stats.usb_tx_drop++;
+        }
+        pbuf_free(p);
+        return;
+    }
+
+    err_t err = to->linkoutput(to, p);
+    if (err == ERR_OK) {
+        if (to == wn) {
+            bridge_stats.to_wifi++;
+        }
+    } else if (to == wn) {
+        /* Only the Wi-Fi side is counted here.  usb_netif_linkoutput() already
+         * counted its own refusal into usb_tx_drop, and cyw43_netif_output()
+         * counts nothing, so counting the USB failure here too would report one
+         * lost frame twice. */
+        bridge_stats.wifi_drop++;
+    }
+
+    pbuf_free(p);                  /* ours to free: linkoutput() did not take it */
+}
+
+/* netif->input on the USB port, replacing ethernet_input() for this build. */
+static err_t bridge_l2_usb_input(struct pbuf *p, struct netif *netif)
+{
+    bridge_l2_snoop_host(p);
+#if TRACE_FRAMES
+    {
+        uint8_t head[42];
+        uint16_t n = (p->tot_len > sizeof(head)) ? (uint16_t)sizeof(head)
+                                                   : (uint16_t)p->tot_len;
+        if (pbuf_copy_partial(p, head, (u16_t)n, 0) == (u16_t)n) {
+            bridge_trace_hex("->wifi", head, n);
+        }
+    }
+#endif
+    bridge_l2_forward(netif, p);
+    return ERR_OK;                 /* we consumed p; the caller must not free it */
+}
+
+/* netif->input on the Wi-Fi port, replacing the ethernet_input() cyw43 sets. */
+static err_t bridge_l2_wifi_input(struct pbuf *p, struct netif *netif)
+{
+    if (p->tot_len < SIZEOF_ETH_HDR) {
+        pbuf_free(p);
+        return ERR_OK;
+    }
+
+    struct eth_addr *src = (struct eth_addr *)(((u8_t *)p->payload) + ETH_HWADDR_LEN);
+
+    /* refl: with the host using the station's own MAC, any frame arriving on
+     * Wi-Fi *sourced* by that MAC can only be the access point bouncing the
+     * host's own transmission back.  Sending it out again would push it back
+     * the way it came, so it is counted and dropped. */
+    if (memcmp(src, netif->hwaddr, ETH_HWADDR_LEN) == 0) {
+        bridge_stats.refl++;
+        pbuf_free(p);
+        return ERR_OK;
+    }
+
+    bridge_l2_forward(netif, p);
+    return ERR_OK;                 /* cyw43 frees only if we return non-ERR_OK */
+}
+#endif /* BRIDGE_L2_BRIDGE */
 
 
 /* ----------------------- USB-side DHCP (TinyUSB dhserver) ---------------- */
+/* This whole block belongs to the L3 path.  A transparent bridge does not lease
+ * addresses: the host takes its lease from your router, exactly as any other
+ * station on the network does, so there is no server to run and no pool to
+ * exhaust. */
+#if !BRIDGE_L2_BRIDGE
 /* dhserver.h is TinyUSB's own miniature lwIP-based DHCP server.  It answers on
  * netif_default, so bridge_hook_route_src() has to keep netif_default pointing
  * at the Wi-Fi interface only for traffic that really belongs there. */
@@ -546,8 +742,19 @@ static void bridge_refresh_dns(void)
     }
 #endif
 }
+#else  /* BRIDGE_L2_BRIDGE: no server, no pool, nothing to refresh. */
+static void bridge_refresh_dns(void)
+{
+}
+#endif /* !BRIDGE_L2_BRIDGE */
 
 /* ------------------------------ Wi-Fi uplink ----------------------------- */
+#if BRIDGE_L2_BRIDGE
+/* Defined below, next to the forwarder it installs.  Declared here because
+ * bridge_service_wifi() has to be able to re-run it. */
+static void bridge_attach_l2_ports(void);
+#endif
+
 #if BRIDGE_WIFI_ENABLE
 static bool     wifi_connecting;      /* an async connect attempt is live */
 static absolute_time_t wifi_retry_at;
@@ -581,10 +788,24 @@ static void bridge_service_wifi(void)
 
     struct netif *wn = bridge_wifi_netif();
 
-    if (netif_is_link_up(wn) && !ip4_addr_isany_val(*netif_ip4_addr(wn))) {
+#if BRIDGE_L2_BRIDGE
+    /* cyw43 re-adds w0 (cyw43_cb_tcpip_init, cyw43_ctrl.c:567-568) whenever the
+     * interface is brought up again, and that puts ethernet_input() back on the
+     * bridged port and restarts the station's own DHCP client.  Both are wrong
+     * for this build, so the attachment is re-checked every poll instead of
+     * assumed to survive the run. */
+    bridge_attach_l2_ports();
+#endif
+
+    (void)wn;                     /* only the L3 path prints the address */
+    if (bridge_wifi_ready()) {
         if (wifi_connecting) {
             wifi_connecting = false;
+#if BRIDGE_L2_BRIDGE
+            printf("[bridge] wifi up (bridged, no address of its own)\n");
+#else
             printf("[bridge] wifi up: %s\n", ip4addr_ntoa(netif_ip4_addr(wn)));
+#endif
             bridge_refresh_dns();
             /* The association event the debug stream exists to report. */
             console_debug_logf("associated to %s",
@@ -721,12 +942,20 @@ const char *bridge_wifi_ipv4_word(void)
 {
     static char word[16];
 #if BRIDGE_WIFI_ENABLE
+#if BRIDGE_L2_BRIDGE
+    (void)word;
+    /* Reported as it is.  A transparent bridge owns no address: the address on
+     * your network belongs to the host, and the console shows it under
+     * "host IPv4", snoopated from the frames the host sends. */
+    return "(bridge: none)";
+#else
     struct netif *wn = bridge_wifi_netif();
 
     if ((wn == NULL) || ip4_addr_isany_val(*netif_ip4_addr(wn))) {
         return "(no address yet)";
     }
     return ip4addr_ntoa_r(netif_ip4_addr(wn), word, sizeof(word));
+#endif
 #else
     (void)word;
     return "(no radio)";
@@ -921,6 +1150,17 @@ void bridge_print_status(void)
     struct netif *wn = bridge_wifi_netif();
     const bridge_stats_t *s = &bridge_stats;
 
+#if BRIDGE_L2_BRIDGE
+    (void)wn;
+    printf("[bridge] wifi %-15s usb %-4s  bridged  usb rx/tx %lu/%lu drop %lu/%lu"
+           "  wdrop %lu refl %lu noroute %lu\n",
+           bridge_wifi_ready() ? "up" : "down",
+           bridge_usb_ready() ? "up" : "down",
+           (unsigned long)s->usb_rx, (unsigned long)s->usb_tx,
+           (unsigned long)s->usb_rx_drop, (unsigned long)s->usb_tx_drop,
+           (unsigned long)s->wifi_drop,
+           (unsigned long)s->refl, (unsigned long)s->no_route);
+#else
     printf("[bridge] wifi %-15s usb %-4s nat %2u/%u  usb rx/tx %lu/%lu drop %lu/%lu"
            "  fwd %lu noroute %lu\n",
            bridge_wifi_ready() ? ip4addr_ntoa(netif_ip4_addr(wn)) : "down",
@@ -929,6 +1169,7 @@ void bridge_print_status(void)
            (unsigned long)s->usb_rx, (unsigned long)s->usb_tx,
            (unsigned long)s->usb_rx_drop, (unsigned long)s->usb_tx_drop,
            (unsigned long)s->forwarded, (unsigned long)s->no_route);
+#endif
 }
 
 /* The periodic line of the debug console, field for field as table 2 defines
@@ -938,6 +1179,11 @@ void bridge_print_status(void)
  *            (wifi_tx also counts the Pico's own DHCP client, so it is not it)
  *   ->host   usb_tx     frames handed to the host
  *   txdrop   no_route   host frames with no uplink to go out on
+ *   wdrop    wifi_drop  host frames the Wi-Fi side refused after it was chosen
+ *            (not in table 2, and it is reported anyway: in the transparent
+ *            build this is the one counter that says "the radio refused the
+ *            frame", and without it a bridge that drops on the radio looks
+ *            identical to one that never received the frame)
  *   rxdrop   usb_tx_drop frames that could not be handed to USB
  *   refl     refl       the host's own frames, bounced back by the access point
  *   poolfail poolfail   lwIP's pbuf pool empty at the moment a frame arrived
@@ -955,11 +1201,12 @@ size_t bridge_format_stats(char *buf, size_t len)
     int n;
 
     n = snprintf(buf, len,
-                 "stats: ->wifi=%lu ->host=%lu txdrop=%lu rxdrop=%lu refl=%lu "
+                 "stats: ->wifi=%lu ->host=%lu txdrop=%lu wdrop=%lu rxdrop=%lu refl=%lu "
                  "poolfail=%lu ringpk=%u link=%s hangs=%lu faults=%lu "
                  "faultpc=0x%08x freeram=%lu host=%s",
                  (unsigned long)s->to_wifi, (unsigned long)s->usb_tx,
-                 (unsigned long)s->no_route, (unsigned long)s->usb_tx_drop,
+                 (unsigned long)s->no_route, (unsigned long)s->wifi_drop,
+                 (unsigned long)s->usb_tx_drop,
                  (unsigned long)s->refl, (unsigned long)s->poolfail,
                  (unsigned)s->ringpk,
                  bridge_link_word(),
@@ -1027,10 +1274,34 @@ static void bridge_drain_usb_rx(void)
 }
 
 /* --------------------------------- bring up ------------------------------ */
-/* A locally administered MAC derived from the board's unique id, so that two
- * Picos on the same desk do not present the same interface to a host. */
+/* The MAC TinyUSB describes to the host as iMACAddress.
+ *
+ * BRIDGE_L2_BRIDGE 1: adopt the station's own address.  That is what "one MAC,
+ * end-to-end identity" means in practice - the host's USB interface and the
+ * CYW43 station become the same Ethernet address, so the access point sees one
+ * station, answers to one address, and the host is on your network rather than
+ * behind the Pico.  cyw43_netif_init() has already put the station's address in
+ * w0->hwaddr (cyw43_lwip.c:149, via cyw43_wifi_get_mac), which is why
+ * bridge_init() initialises cyw43 before tusb_init() in this mode.
+ *
+ * Otherwise (and as the fallback when there is no radio): a locally administered
+ * address derived from the board's unique id, so two Picos on the same desk do
+ * not present the same interface to a host. */
 static void bridge_init_mac(void)
 {
+#if BRIDGE_L2_BRIDGE
+    struct netif *wn = bridge_wifi_netif();
+
+    if ((wn != NULL) && (wn->hwaddr_len == ETH_HWADDR_LEN)) {
+        memcpy(tud_network_mac_address, wn->hwaddr, ETH_HWADDR_LEN);
+        printf("[bridge] usb mac adopted from the station %02x:%02x:%02x:%02x:%02x:%02x\n",
+               tud_network_mac_address[0], tud_network_mac_address[1], tud_network_mac_address[2],
+               tud_network_mac_address[3], tud_network_mac_address[4], tud_network_mac_address[5]);
+        return;
+    }
+    printf("[bridge] no station MAC to adopt yet: falling back to the board id\n");
+#endif
+
     pico_unique_board_id_t id;
     pico_get_unique_board_id(&id);
 
@@ -1040,6 +1311,103 @@ static void bridge_init_mac(void)
     tud_network_mac_address[3] = id.id[1];
     tud_network_mac_address[4] = id.id[2];
     tud_network_mac_address[5] = id.id[3];
+}
+
+/* cyw43 + lwIP's Wi-Fi netif.  Split out because the two data paths want it at
+ * different moments: the L3 path can bring the USB side up first (a host should
+ * get a link and a lease even with no uplink), but the L2 path must know the
+ * station's MAC before TinyUSB describes the interface. */
+static void bridge_init_wifi(void)
+{
+#if BRIDGE_WIFI_ENABLE
+    int rc = cyw43_arch_init_with_country(console_country_code());
+    if (rc != 0) {
+        printf("[bridge] cyw43 init failed (%d): no Wi-Fi uplink\n", rc);
+        return;
+    }
+    wifi_present = true;
+    cyw43_arch_enable_sta_mode();
+#else
+    printf("[bridge] Wi-Fi side disabled (BRIDGE_WIFI_ENABLE=0): USB-only build\n");
+#endif
+}
+
+#if BRIDGE_L2_BRIDGE
+/* Hand both ports of the bridge to the forwarder.
+ *
+ * cyw43 sets w0->input to ethernet_input() and starts its own DHCP client on
+ * w0.  Neither survives contact with a transparent bridge: the frames must reach
+ * the host rather than lwIP, and a station that leases an address for itself
+ * while the host behind it leases another one is two addresses on one MAC -
+ * precisely what the requirement says there must not be.  So the client is
+ * stopped and the input functions are replaced. */
+static void bridge_attach_l2_ports(void)
+{
+    struct netif *wn = bridge_wifi_netif();
+
+    if (wn == NULL) {
+        return;
+    }
+
+    /* Idempotent, because bridge_service_wifi() calls it every poll: cyw43 puts
+     * its own input function back when it re-adds the interface, and printing
+     * the adoption line on each of those would flood the console. */
+    if ((bridge_usb_netif.input == bridge_l2_usb_input) &&
+        (wn->input == bridge_l2_wifi_input)) {
+        return;
+    }
+
+#if LWIP_DHCP
+    dhcp_stop(wn);
+#endif
+    wn->input = bridge_l2_wifi_input;
+    bridge_usb_netif.input = bridge_l2_usb_input;
+
+    printf("[bridge] l2 bridge: 2 ports, host adopts %02x:%02x:%02x:%02x:%02x:%02x\n",
+           tud_network_mac_address[0], tud_network_mac_address[1], tud_network_mac_address[2],
+           tud_network_mac_address[3], tud_network_mac_address[4], tud_network_mac_address[5]);
+}
+#endif
+
+
+/* The USB netif, identical in both modes except for the address it is given:
+ * a router hands the host an address of its own, a bridge hands it nothing. */
+static bool bridge_add_usb_netif(void)
+{
+    ip4_addr_t ip, mask, gw;
+
+#if BRIDGE_L2_BRIDGE
+    IP4_ADDR(&ip, 0, 0, 0, 0);
+    IP4_ADDR(&mask, 0, 0, 0, 0);
+    IP4_ADDR(&gw, 0, 0, 0, 0);
+#else
+    BRIDGE_IP4_ADDR(&ip,   BRIDGE_HOST_IP);
+    BRIDGE_IP4_ADDR(&mask, BRIDGE_HOST_NETMASK);
+    BRIDGE_IP4_ADDR(&gw,   BRIDGE_HOST_IP);
+#endif
+
+    if (netif_add(&bridge_usb_netif, &ip, &mask, &gw, NULL,
+                  usb_netif_init, ethernet_input) == NULL) {
+        printf("[bridge] FATAL: could not add the USB netif\n");
+        return false;
+    }
+    bridge_usb_netif.linkoutput = usb_netif_linkoutput;
+    bridge_usb_netif.output     = usb_netif_output;
+    netif_set_link_callback(&bridge_usb_netif, usb_netif_link_cb);
+    netif_set_up(&bridge_usb_netif);
+    if (usb_link_up) {
+        netif_set_link_up(&bridge_usb_netif);
+    }
+
+#if BRIDGE_L2_BRIDGE
+    printf("[bridge] usb netif bridged, no address (the host takes one from your router)\n");
+#else
+    printf("[bridge] usb netif %s/%s gw %s\n",
+           ip4addr_ntoa(netif_ip4_addr(&bridge_usb_netif)),
+           ip4addr_ntoa(netif_ip4_netmask(&bridge_usb_netif)),
+           ip4addr_ntoa(netif_ip4_gw(&bridge_usb_netif)));
+#endif
+    return true;
 }
 
 void bridge_init(void)
@@ -1055,6 +1423,24 @@ void bridge_init(void)
     /* Settings first: the Wi-Fi side is started from the profile this loads. */
     console_init();
 
+#if BRIDGE_L2_BRIDGE
+    /* The station comes first here.  TinyUSB fixes the interface's description
+     * when tusb_init() runs, and in this mode that description has to carry the
+     * station's MAC, so cyw43 has to be up before it. */
+    bridge_init_wifi();
+    diagnostics_kick();                 /* cyw43 firmware load is the slow step */
+
+    bridge_init_mac();
+
+    tusb_init();
+    usb_link_up = tud_mounted();
+    diagnostics_kick();
+
+    if (!bridge_add_usb_netif()) {
+        return;
+    }
+    bridge_attach_l2_ports();
+#else
     bridge_init_mac();
     printf("[bridge] usb mac %02x:%02x:%02x:%02x:%02x:%02x\n",
            tud_network_mac_address[0], tud_network_mac_address[1], tud_network_mac_address[2],
@@ -1064,51 +1450,24 @@ void bridge_init(void)
      * if there is no Wi-Fi to bridge to yet. */
     tusb_init();
     usb_link_up = tud_mounted();
-    diagnostics_kick();             /* init steps are slow; keep the watchdog fed */
+    diagnostics_kick();                 /* init steps are slow; keep the watchdog fed */
 
-    ip4_addr_t ip, mask, gw;
-    BRIDGE_IP4_ADDR(&ip,   BRIDGE_HOST_IP);
-    BRIDGE_IP4_ADDR(&mask, BRIDGE_HOST_NETMASK);
-    BRIDGE_IP4_ADDR(&gw,   BRIDGE_HOST_IP);
-
-    if (netif_add(&bridge_usb_netif, &ip, &mask, &gw, NULL,
-                  usb_netif_init, ethernet_input) == NULL) {
-        printf("[bridge] FATAL: could not add the USB netif\n");
+    if (!bridge_add_usb_netif()) {
         return;
     }
-    bridge_usb_netif.linkoutput = usb_netif_linkoutput;
-    bridge_usb_netif.output     = usb_netif_output;
-    netif_set_link_callback(&bridge_usb_netif, usb_netif_link_cb);
-    netif_set_up(&bridge_usb_netif);
-    if (usb_link_up) {
-        netif_set_link_up(&bridge_usb_netif);
-    }
-    printf("[bridge] usb netif %s/%s gw %s\n",
-           ip4addr_ntoa(netif_ip4_addr(&bridge_usb_netif)),
-           ip4addr_ntoa(netif_ip4_netmask(&bridge_usb_netif)),
-           ip4addr_ntoa(netif_ip4_gw(&bridge_usb_netif)));
 
-    /* Wi-Fi uplink.  cyw43 adds "w0", makes it netif_default and starts its
-     * own DHCP client; we only have to ask it to associate.  The country comes
-     * from the saved settings so `set country` survives a reboot. */
-#if BRIDGE_WIFI_ENABLE
-    int rc = cyw43_arch_init_with_country(console_country_code());
-    if (rc != 0) {
-        printf("[bridge] cyw43 init failed (%d): no Wi-Fi uplink\n", rc);
-    } else {
-        wifi_present = true;
-        cyw43_arch_enable_sta_mode();
-
+    /* Wi-Fi uplink.  cyw43 adds "w0", makes it netif_default and starts its own
+     * DHCP client; we only have to ask it to associate.  The country comes from
+     * the saved settings so `set country` survives a reboot. */
+    bridge_init_wifi();
+    if (wifi_present) {
         /* Route everything that leaves the Wi-Fi side through the NAT. */
 #if BRIDGE_NAT_ENABLE
         bridge_wifi_netif()->output = bridge_nat_output;
 #endif
         wifi_retry_at = get_absolute_time();
     }
-#else
-    printf("[bridge] Wi-Fi side disabled (BRIDGE_WIFI_ENABLE=0): USB-only build\n");
-#endif
-    diagnostics_kick();             /* cyw43 firmware load is the slow step */
+    diagnostics_kick();                 /* cyw43 firmware load is the slow step */
 
     bridge_init_dhcp();
     if (dhserv_init(&dhcp_config) != ERR_OK) {
@@ -1119,6 +1478,7 @@ void bridge_init(void)
                BRIDGE_HOST_POOL_FIRST + BRIDGE_HOST_POOL_SIZE - 1,
                BRIDGE_HOST_LEASE_SECONDS);
     }
+#endif /* BRIDGE_L2_BRIDGE */
 
     bridge_initialised = true;
 }
@@ -1149,7 +1509,9 @@ void bridge_poll(void)
      * timeouts never fire. */
     sys_check_timeouts();
 #endif
+#if !BRIDGE_L2_BRIDGE
     bridge_nat_expire();
+#endif
 
     static absolute_time_t led_at;
     static absolute_time_t status_at;

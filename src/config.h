@@ -46,6 +46,32 @@
 #define BRIDGE_WIFI_RETRY_SECONDS 10
 #endif
 
+/* ------------------------- transparent L2 bridging ------------------------ */
+/* What the two modes actually are:
+
+ * BRIDGE_L2_BRIDGE = 0  (the default, and what build/ contains today)
+ *      lwIP terminates IP on both interfaces and routes between them:
+ *      IP_FORWARD + LWIP_HOOK_IP4_ROUTE_SRC + a private 172.28.0.0/24 handed to
+ *      the host by a DHCP server running on the Pico + source NAT on the way
+ *      out.  The host is one hop behind the Pico, and the NAT table is a hard
+ *      ceiling on concurrent flows (measured: 64 flows, and past it a live
+ *      connection simply stops getting replies).
+ *
+ * BRIDGE_L2_BRIDGE 1  (what the requirements ask for)
+ *      The Pico forwards Ethernet frames.  A frame from the host leaves on the
+ *      Wi-Fi interface unchanged; a frame from the access point goes back out
+ *      to the host.  No IP decision, so no routing table, no address
+ *      translation and no per-flow mapping to run out of.  The host adopts the
+ *      station's MAC, takes the router's own DHCP lease, and the Pico holds no
+ *      address at all.
+ *
+ * It is 0 here so that build/ stays the reference image until the L2 path has
+ * been validated on hardware; -DBRIDGE_L2_BRIDGE=1 builds the bridge itself.
+ * See .clinerules/00-requirements-baseline.md (R2, R3, R4, R5). */
+#ifndef BRIDGE_L2_BRIDGE
+#define BRIDGE_L2_BRIDGE        0
+#endif
+
 /* ------------------- USB side: the network the PC joins ----------------- */
 /* The Pico takes .1 of this network; the host is leased an address from the
    pool below.  172.28.0.0/24 is chosen because it almost never collides with
@@ -78,8 +104,15 @@
 #endif
 
 /* ---------------------------------- NAT --------------------------------- */
+/* Off by default in the transparent build: a bridge that forwards Ethernet
+ * frames has no address to translate into, so a NAT table would be dead code
+ * and -DBRIDGE_L2_BRIDGE=1 alone would leave it compiled in. */
 #ifndef BRIDGE_NAT_ENABLE
+#if BRIDGE_L2_BRIDGE
+#define BRIDGE_NAT_ENABLE       0
+#else
 #define BRIDGE_NAT_ENABLE       1
+#endif
 #endif
 #ifndef BRIDGE_NAT_TABLE_SIZE
 #define BRIDGE_NAT_TABLE_SIZE   64
