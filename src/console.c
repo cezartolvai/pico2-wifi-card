@@ -776,7 +776,10 @@ void console_dump_state(void)
                    "    country:    %s\n"
                    "    debug:      %s\n"
                    "    status:     %s\n"
-                   "    wifi IPv4:  %s  gw %s\n"
+                   /* Neither an address nor a gateway: a transparent bridge owns
+                    * no IP at all, so the line says so instead of reporting a
+                    * pair the station's own (stopped) client once learned. */
+                   "    wifi IP:    %s\n"
                    "    host IPv4:  %s\n"
                    "    host IPv6:  %s\n"
                    "    mode:       transparent L2 bridge (no NAT, no lease)\n",
@@ -785,7 +788,7 @@ void console_dump_state(void)
                    ssid_word(), pass_word(), country_word(),
                    bridge_settings.debug ? "on" : "off",
                    bridge_status_word(),
-                   bridge_wifi_ipv4_word(), bridge_wifi_gateway_word(),
+                   bridge_wifi_ipv4_word(),
                    bridge_host_ipv4_word(),
                    "(ipv6 off)");
 #else

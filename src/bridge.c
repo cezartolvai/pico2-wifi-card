@@ -967,17 +967,27 @@ const char *bridge_wifi_gateway_word(void)
     static char word[16];
 
 #if BRIDGE_WIFI_ENABLE
+#if BRIDGE_L2_BRIDGE
+    /* Same reason as the address above: a transparent bridge owns no gateway
+     * either.  Reporting the gateway the station's own client once learned would
+     * describe a route this build does not use, and the station's client is
+     * stopped anyway. */
+    (void)word;
+    return "(bridge: none)";
+#else
     struct netif *wn = bridge_wifi_netif();
 
     if ((wn == NULL) || ip4_addr_isany_val(*netif_ip4_gw(wn))) {
         return "(none)";
     }
     return ip4addr_ntoa_r(netif_ip4_gw(wn), word, sizeof(word));
+#endif
 #else
     (void)word;
     return "(none)";
 #endif
 }
+
 
 /* -------------------------------- diagnostics ---------------------------- */
 /* The onboard LED is a GPIO on the CYW43 chip, so it can only be driven when
