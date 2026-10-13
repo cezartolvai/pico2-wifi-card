@@ -33,6 +33,26 @@ target_include_directories(pico2_wifi_card PRIVATE
     ${PICO_TINYUSB_PATH}/lib/networking
 )
 
+# Warnings on for this project's own sources.  The state dump is one
+# console_printf() call with a dozen arguments, and a line added to the format
+# string without its argument prints whatever the stack happens to hold - that
+# is how "nat: 268528885/53697" and an empty "mac:" line reached a board.  The
+# format attribute on console_printf() only checks anything when -Wformat is on,
+# and the SDK's default flag set does not turn it on.
+#
+# Scoped to the files under src/ rather than to the target: the target also
+# compiles vendored code (TinyUSB's dhserver.c) and the SDK's lwIP, and lwIP's
+# dhcp.c emits -Wstringop-overflow noise that is not ours to fix here.
+set(BRIDGE_OWN_SOURCES
+    src/main.c
+    src/bridge.c
+    src/console.c
+    src/diagnostics.c
+    src/nat.c
+    src/usb_descriptors.c
+)
+set_source_files_properties(${BRIDGE_OWN_SOURCES} PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra")
+
 target_link_libraries(pico2_wifi_card PRIVATE
     pico_stdlib
     pico_cyw43_arch_lwip_poll     # cyw43 + lwIP (NO_SYS=1) + poll async_context
@@ -74,6 +94,7 @@ set(BRIDGE_KNOBS
     BRIDGE_FALLBACK_DNS
     BRIDGE_USB_RX_SLOTS
     BRIDGE_MAX_FRAME
+    BRIDGE_SETTINGS_RESERVE_SECTORS
     BRIDGE_VERBOSE
     BRIDGE_STATUS_INTERVAL_MS
     BRIDGE_LED

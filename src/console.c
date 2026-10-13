@@ -38,12 +38,19 @@
 #define BRIDGE_SCAN_MAX     12u
 
 /* ------------------------------ settings in flash ------------------------- */
-/* The record lives in the LAST flash sector, away from the program image at the
- * start of the chip: reflashing a .uf2 leaves the saved profiles intact.     */
+/* Not the last sector of the chip - see BRIDGE_SETTINGS_RESERVE_SECTORS in
+ * config.h.  A .uf2 load on an RP2350 carries the RP2350-E10 absolute block at
+ * 0x10ffff00, which on a 4 MB part lands in the final 4 kB sector and whose
+ * erase wipes it whatever the size of the image; a record stored in that last
+ * sector was measured disappearing on every reflash.  Sixteen sectors down
+ * (offset 0x3f0000, XIP 0x103f0000 on a 4 MB chip) it is clear of that alias,
+ * clear of the BTStack flash bank at the top, and still far above the program
+ * image, which is the separation the specification asks for. */
 #define SETTINGS_MAGIC      0x50434631u   /* "1SCP" */
 #define SETTINGS_VERSION    1u
 #define SETTINGS_SECTOR     4096u
-#define SETTINGS_OFFS       (PICO_FLASH_SIZE_BYTES - SETTINGS_SECTOR)
+#define SETTINGS_OFFS       (PICO_FLASH_SIZE_BYTES - \
+                             (BRIDGE_SETTINGS_RESERVE_SECTORS * SETTINGS_SECTOR))
 #define SETTINGS_HDR        16u
 
 bridge_settings_t bridge_settings;
@@ -139,9 +146,17 @@ static void console_write_str(uint8_t itf, const char *s)
     console_write(itf, s, strlen(s));
 }
 
+/* Checked as a printf: the state dump is one call with eleven arguments, and a
+ * line added without its argument prints whatever the stack happens to hold -
+ * which is how "nat: 268528909/53697" once appeared on the console. */
+__attribute__((format(printf, 2, 3)))
 static void console_printf(uint8_t itf, const char *fmt, ...)
 {
-    static char buf[320];
+    /* 384, not 256: the state dump is one printf with every line in it, and with
+     * the mac line added its worst case (a 32-char SSID, an unconfigured status,
+     * both MACs) is past 320.  Truncating it silently would drop the last line of
+     * the dump - the nat occupancy - which is the line that matters most. */
+    static char buf[384];
     va_list ap;
 
     va_start(ap, fmt);
@@ -236,6 +251,9 @@ uint32_t console_country_code(void)
 /* --------------------------------- REPL state ---------------------------- */
 static char   line[BRIDGE_LINE_MAX];
 static size_t line_len;
+static char   last_char;            /* previous keystroke: folds CRLF into one Enter */
+static volatile bool line_reset;    /* raised in the USB context, applied in the poll loop */
+static bool   console_up;           /* was the console ready at the previous poll? */
 static bool   scan_menu;            /* inside the scan sub-menu             */
 static bool   scan_running;         /* a cyw43 scan is in flight            */
 static bool   scan_live;            /* live mode: keep rescanning           */
@@ -573,7 +591,7 @@ static void cmd_test(char *rest)
     char *what = next_token(&rest);
 
     if (what == NULL) {
-        console_write_str(ITF_MGMT, "    test hang|fault|assert|led\n");
+        console_write_str(ITF_MGMT, "    test hang|fault|assert|led|flash|peek\n");
         return;
     }
 
@@ -633,8 +651,87 @@ static void cmd_test(char *rest)
         console_write_str(ITF_MGMT, "[*] taking an lwIP assert\n");
         console_flush(ITF_MGMT);
         diagnostics_lwip_assert("selftest: deliberate assert");
+    } else if (strcmp(what, "flash") == 0) {
+        /* Where the settings record lives and what that sector holds right now,
+         * read straight out of XIP.  It is what tells "the loader erased it"
+         * from "it was never written": an erased sector is all 0xff.  The CRC is
+         * recomputed from the bytes in flash, so `crc ok` means exactly what
+         * settings_load() would conclude on the next boot - which is the claim
+         * a persistence test has to test. */
+        const uint8_t *rec = (const uint8_t *)(XIP_BASE + SETTINGS_OFFS);
+        uint32_t magic = 0u;
+        uint32_t version = 0u;
+        uint32_t crc = 0u;
+        uint32_t used = SETTINGS_SECTOR;    /* SETTINGS_SECTOR = nothing but 0xff */
+        bool erased = true;
+
+        for (uint32_t i = 0u; i < SETTINGS_SECTOR; i++) {
+            if (rec[i] != 0xffu) {
+                if (used == SETTINGS_SECTOR) {
+                    used = i;
+                }
+                erased = false;
+            }
+        }
+        memcpy(&magic,   rec,        4u);
+        memcpy(&version, rec + 4u,   4u);
+        memcpy(&crc,     rec + 12u,  4u);
+
+        bridge_settings_t body;
+        memcpy(&body, rec + SETTINGS_HDR, sizeof(body));
+
+        bool header_ok = (magic == SETTINGS_MAGIC) && (version == SETTINGS_VERSION);
+        bool crc_ok = header_ok &&
+                      (crc32((const uint8_t *)&body, sizeof(body)) == crc);
+
+        console_printf(ITF_MGMT,
+                       "    record @ 0x%06lx  %s  magic 0x%08lx  ver %lu  crc %s\n",
+                       (unsigned long)SETTINGS_OFFS, erased ? "erased" : "written",
+                       (unsigned long)magic, (unsigned long)version,
+                       crc_ok ? "ok" : "bad");
+        console_printf(ITF_MGMT,
+                       "    profiles in flash %u  active %d  first byte not 0xff at +%lu\n",
+                       header_ok ? (unsigned)body.count : 0u,
+                       header_ok ? (int)body.active : -1,
+                       (unsigned long)used);
+    } else if (strcmp(what, "peek") == 0) {
+        /* Read-only probe of the flash through XIP, the only way on this board to
+         * see how wide the erase that accompanies a .uf2 load really is.  It
+         * never writes, so it is safe to run on a board that is working. */
+        char *offs = next_token(&rest);
+        char *lent = next_token(&rest);
+
+        if (offs == NULL) {
+            console_write_str(ITF_MGMT, "[!] test peek <hex offset> [bytes]\n");
+            return;
+        }
+        unsigned long off = strtoul(offs, NULL, 16);
+        unsigned long len = (lent != NULL) ? strtoul(lent, NULL, 10) : 32u;
+
+        if ((len == 0u) || (len > 64u)) {
+            len = 32u;
+        }
+        if ((off + len) > (unsigned long)PICO_FLASH_SIZE_BYTES) {
+            console_printf(ITF_MGMT, "[!] peek ends past the end of flash (%lu bytes)\n",
+                           (unsigned long)PICO_FLASH_SIZE_BYTES);
+            return;
+        }
+        console_printf(ITF_MGMT, "    flash @ 0x%06lx, %lu bytes\n", off, len);
+        for (unsigned long base = 0u; base < len; base += 16u) {
+            const uint8_t *p = (const uint8_t *)(XIP_BASE + off + base);
+            char hex[16 * 3 + 1];
+            unsigned long i;
+
+            for (i = 0u; (i < 16u) && ((base + i) < len); i++) {
+                hex[i * 3u + 0u] = "0123456789abcdef"[(p[i] >> 4) & 0xfu];
+                hex[i * 3u + 1u] = "0123456789abcdef"[p[i] & 0xfu];
+                hex[i * 3u + 2u] = ' ';
+            }
+            hex[i * 3u] = '\0';
+            console_printf(ITF_MGMT, "    +%04lu  %s\n", base, hex);
+        }
     } else {
-        console_write_str(ITF_MGMT, "[!] test hang|fault|assert|led\n");
+        console_write_str(ITF_MGMT, "[!] test hang|fault|assert|led|flash|peek\n");
     }
 }
 #endif
@@ -645,7 +742,13 @@ static void console_exec(void)
     char *verb = next_token(&cursor);
 
     if (verb == NULL) {
-        console_dump_state();       /* an empty line just reprints the state */
+        /* An empty line just reprints the state. It must still end with the
+         * prompt: a stray CR (a leftover from the previous session, or a host
+         * that sends CRLF) would otherwise leave the console silent after a
+         * dump, and anything waiting for the prompt - a script, or the next
+         * human keystroke - would look like a dead console. */
+        console_dump_state();
+        console_prompt();
         console_flush(ITF_MGMT);
         return;
     }
@@ -682,23 +785,31 @@ static void console_exec(void)
         scan_menu = false;
         scan_live = false;
     } else if (strcmp(cmd, "save") == 0) {
-        console_write_str(ITF_MGMT, settings_save(&bridge_settings) ? "[*] saved to flash\n"
-                                                                  : "[!] save failed\n");
+        /* The address travels with the message: which sector a record was found
+         * in is the first thing to know when one appears to be missing. */
+        if (settings_save(&bridge_settings)) {
+            console_printf(ITF_MGMT, "[*] saved to flash @ 0x%06x\n",
+                           (unsigned)SETTINGS_OFFS);
+        } else {
+            console_write_str(ITF_MGMT, "[!] save failed\n");
+        }
     } else if (strcmp(cmd, "restore") == 0) {
         if (settings_load(&bridge_settings)) {
-            console_write_str(ITF_MGMT, "[*] restored from flash\n");
+            console_printf(ITF_MGMT, "[*] restored from flash @ 0x%06x\n",
+                           (unsigned)SETTINGS_OFFS);
         } else {
-            console_write_str(ITF_MGMT, "[!] nothing saved in flash\n");
+            console_printf(ITF_MGMT, "[!] nothing saved in flash @ 0x%06x\n",
+                           (unsigned)SETTINGS_OFFS);
         }
         bridge_wifi_restart();
     } else if (strcmp(cmd, "stats") == 0) {
         /* The same line the debug stream gets, asked for on the console that is
          * actually open: bridge_print_status() would send it to UART0 instead,
          * where nobody is looking. */
-        char line[256];
+        char stats_line[256];
 
-        bridge_format_stats(line, sizeof(line));
-        console_write_str(ITF_MGMT, line);
+        bridge_format_stats(stats_line, sizeof(stats_line));
+        console_write_str(ITF_MGMT, stats_line);
         console_write(ITF_MGMT, "\n", 1u);
     } else if (strcmp(cmd, "reboot") == 0) {
         /* Not in the specification's table: this bridge is reflashed a lot while
@@ -781,6 +892,12 @@ void console_dump_state(void)
                     * pair the station's own (stopped) client once learned. */
                    "    wifi IP:    %s\n"
                    "    host IPv4:  %s\n"
+                   /* The two addresses a transparent bridge is judged by, printed
+                    * side by side because they must be the same number: the one
+                    * TinyUSB advertises and the one the radio owns.  If they
+                    * differ, the host is not on your network. */
+                   "    mac:        usb %s  station %s\n"
+
                    "    host IPv6:  %s\n"
                    "    mode:       transparent L2 bridge (no NAT, no lease)\n",
                    (unsigned)bridge_settings.count,
@@ -790,6 +907,7 @@ void console_dump_state(void)
                    bridge_status_word(),
                    bridge_wifi_ipv4_word(),
                    bridge_host_ipv4_word(),
+                   bridge_usb_mac_word(), bridge_station_mac_word(),
                    "(ipv6 off)");
 #else
     console_printf(ITF_MGMT,
@@ -802,6 +920,10 @@ void console_dump_state(void)
                    "    wifi IPv4:  %s  gw %s\n"
                    "    host IPv4:  %s\n"
                    "    host IPv6:  %s\n"
+                   /* The same pair as in the transparent-bridge dump.  Here the
+                    * USB address is derived from the board id, so the console shows
+                    * the deviation from the requirement instead of hiding it. */
+                   "    mac:        usb %s  station %s\n"
                    /* Not in the specification's tables: the NAT table is the
                     * bridge's hard limit on concurrent flows, and until now its
                     * occupancy was only visible on UART0, where nothing is
@@ -818,6 +940,7 @@ void console_dump_state(void)
                    /* Reported as it is: this build has LWIP_IPV6 = 0, so there
                     * is no IPv6 address to snoop for either side. */
                    "(ipv6 off)",
+                   bridge_usb_mac_word(), bridge_station_mac_word(),
                    bridge_nat_active(), BRIDGE_NAT_TABLE_SIZE);
 #endif
 }
@@ -838,7 +961,20 @@ static void console_prompt(void)
  * a mistyped value can be fixed without retyping the whole line. */
 static void console_char(char c)
 {
+    char prev = last_char;
+
+    last_char = c;
+
     if ((c == '\r') || (c == '\n')) {
+        /* CR and LF both mean Enter, and a terminal that sends the pair means
+         * Enter once.  Counting the pair as two runs the line twice: the second
+         * run is an empty line, which reprints the whole state dump, so a reader
+         * that stops after a fixed time sees the tail of a dump it already saw
+         * and the session looks garbled.  A deliberate double Enter ("\r\r",
+         * "\n\n") still executes twice. */
+        if (((c == '\n') && (prev == '\r')) || ((c == '\r') && (prev == '\n'))) {
+            return;
+        }
         console_write_str(ITF_MGMT, "\r\n");
         line[line_len] = '\0';
         console_exec();
@@ -889,7 +1025,19 @@ void console_poll(void)
     scan_service();
 
     if (!tud_cdc_n_ready(ITF_MGMT)) {
+        console_up = false;
         return;                     /* console not enumerated yet */
+    }
+    if (!console_up || line_reset) {
+        /* A new session.  A half-typed line left over from the previous one, and
+         * any byte the host sent while the board was rebooting or busy, must not
+         * become a command in this one - a stale tail is how a console looks like
+         * it is answering a command nobody typed. */
+        console_up  = true;
+        line_reset  = false;
+        line_len    = 0u;
+        last_char   = 0;
+        tud_cdc_n_read_flush(ITF_MGMT);
     }
     if (!banner_shown) {
         banner_shown = true;
@@ -905,3 +1053,20 @@ void console_poll(void)
     }
     console_flush(ITF_MGMT);
 }
+
+/* The host opening or closing the console is a session boundary: the cdc-acm
+ * driver sends SET_CONTROL_LINE_STATE on both, and TinyUSB calls this for it
+ * (cdc_device.c:423).  It runs in the USB context, so it only raises the flag -
+ * clearing the line and draining the fifo happens in console_poll(), which is
+ * where the rest of the console work runs. */
+void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
+{
+    (void)dtr;
+    (void)rts;
+
+    if (itf != ITF_MGMT) {
+        return;                     /* the debug stream is write-only */
+    }
+    line_reset = true;
+}
+

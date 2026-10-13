@@ -1,4 +1,4 @@
-# Repo-ul nu este încă git-managed; fișierul e pregătit pentru când devine.
+# Repo-ul este git-managed (ramură main).
 # (vezi .clinerules/04-security.md - credențialele nu se comită)
 
 build/
@@ -8,12 +8,17 @@ build-*/
 CMakeCache.txt
 CMakeFiles/
 *.uf2
+*.uf2.map
 *.elf
 *.elf.map
 *.bin
 
 # SDK-ul vendorat (100+ MB) nu se comită
 .pico-sdk/
+
+# Scripturile de validare generează cache Python
+__pycache__/
+*.pyc
 
 # Fișiere locale de credențiale - nu se comită niciodată
 credentials.cmake

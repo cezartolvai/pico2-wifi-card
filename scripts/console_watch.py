@@ -45,6 +45,7 @@ while time.time() < end:
     cycles += 1
     opened = time.time()
     total = 0
+    reason = "budget"                 # "budget" | "port" | "write"
 
     # Send first: on a board that resets every second the command has to be in
     # flight before the poll loop gets a chance to die.
@@ -53,12 +54,14 @@ while time.time() < end:
             ser.write((cmd + "\r\n").encode())
             ser.flush()
         except Exception:
+            reason = "write"
             break
 
     while time.time() < end:
         try:
             pending = ser.in_waiting
         except Exception:
+            reason = "port"
             break                      # the port died with the board
         if pending:
             data = ser.read(pending)
@@ -70,9 +73,18 @@ while time.time() < end:
         else:
             time.sleep(0.05)
         if not os.path.exists(device):
+            reason = "port"
             break                      # the board reset
 
-    print(f"[cycle {cycles}] {total} bytes before the port went away")
+    # The old wording claimed "the port went away" on every exit, which made a
+    # clean full capture look like a partial one and a real board reset look
+    # ordinary.  The two have to be told apart: one is a complete reading, the
+    # other is not.
+    if reason == "budget":
+        print(f"[cycle {cycles}] {total} bytes watched to the end of the budget "
+              f"(the port stayed open)")
+    else:
+        print(f"[cycle {cycles}] {total} bytes before the port went away ({reason})")
     try:
         ser.close()
     except Exception:

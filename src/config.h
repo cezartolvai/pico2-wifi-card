@@ -150,6 +150,31 @@
 #define BRIDGE_MAX_FRAME        1514
 #endif
 
+/* --------------------------- settings in flash --------------------------- */
+/* The record keeps the tail of the chip - separate from the program image at
+ * the start, which is what the specification asks - but it no longer sits in
+ * the LAST 4 kB of the chip.
+ *
+ * Flashing an RP2350 carries the RP2350-E10 absolute block (family ABSOLUTE,
+ * extension UF2_EXTENSION_RP2_IGNORE_BLOCK) targeting 0x10ffff00, the top of the
+ * flash address window.  On a 4 MB part that address lands in the final 4 kB
+ * sector, and the erase which accompanies the load wipes that sector whatever
+ * the size of the image - measured here with an 81 kB image, and stated by the
+ * SDK maintainers in pico-sdk#1943: "this drag & drop will unnecessarily erase
+ * the last 4KiB of connected flash", while "picotool ... will ignore any
+ * E10 abs-blocks".
+ *
+ * So the record sits BRIDGE_SETTINGS_RESERVE_SECTORS below the top: clear of
+ * that alias, clear of the sectors picotool reserves for the BTStack flash bank,
+ * and still far above the program image (0x10000000..0x10053524).  Widen the
+ * guard with -DBRIDGE_SETTINGS_RESERVE_SECTORS=<n> if a loader is ever measured
+ * erasing more than this; `test peek` in a self-test build is how that span is
+ * measured. */
+#ifndef BRIDGE_SETTINGS_RESERVE_SECTORS
+#define BRIDGE_SETTINGS_RESERVE_SECTORS 16
+#endif
+
+
 /* ------------------------------ diagnostics ----------------------------- */
 /* 0 = quiet, 1 = status line every BRIDGE_STATUS_INTERVAL_MS. */
 #ifndef BRIDGE_VERBOSE

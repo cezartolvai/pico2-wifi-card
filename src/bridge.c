@@ -252,7 +252,7 @@ bool tud_network_recv_cb(const uint8_t *src, uint16_t size)
     /* ringpk: the deepest the queue got since the last stats line.  A number
      * close to BRIDGE_USB_RX_SLOTS means the host is sending faster than lwIP
      * can take the frames. */
-    unsigned depth = (unsigned)((rx_write + BRIDGE_USB_RX_SLOTS - rx_read) % BRIDGE_USB_RX_SLOTS);
+    unsigned depth = ring_depth();
     if (depth > bridge_stats.ringpk) {
         bridge_stats.ringpk = (uint16_t)depth;
     }
@@ -732,7 +732,12 @@ static void bridge_init_dhcp(void)
 }
 
 /* Once the Wi-Fi side has been told a resolver by its own DHCP server, pass
- * that one on to the USB host instead of the hard-coded fallback. */
+ * that one on to the USB host instead of the hard-coded fallback.
+ *
+ * The only call site is bridge_service_wifi(), and that exists only when
+ * BRIDGE_WIFI_ENABLE is 1; defining this outside that guard left an unused
+ * static function in the USB-only build. */
+#if BRIDGE_WIFI_ENABLE
 static void bridge_refresh_dns(void)
 {
 #if LWIP_DNS
@@ -742,10 +747,13 @@ static void bridge_refresh_dns(void)
     }
 #endif
 }
+#endif /* BRIDGE_WIFI_ENABLE */
 #else  /* BRIDGE_L2_BRIDGE: no server, no pool, nothing to refresh. */
+#if BRIDGE_WIFI_ENABLE
 static void bridge_refresh_dns(void)
 {
 }
+#endif /* BRIDGE_WIFI_ENABLE */
 #endif /* !BRIDGE_L2_BRIDGE */
 
 /* ------------------------------ Wi-Fi uplink ----------------------------- */
@@ -987,6 +995,52 @@ const char *bridge_wifi_gateway_word(void)
     return "(none)";
 #endif
 }
+/* The two Ethernet addresses a bridge is judged by: the one TinyUSB advertises on
+ * the host's interface, and the one the radio owns.  In the transparent bridge
+ * they must be the same number - that is what "one MAC, end-to-end identity"
+ * means - and the match has to be readable on the console, because the line
+ * bridge_init_mac() prints goes to UART0 and nothing is plugged into UART0 here.
+ * Formatted octet by octet rather than with a six-argument format string: the
+ * order of those six arguments is exactly what a reader has to be able to trust. */
+static void bridge_format_mac(const uint8_t *mac, char *word, size_t size)
+{
+    size_t used = 0u;
+
+    for (size_t i = 0; i < ETH_HWADDR_LEN; i++) {
+        if (used + 3u >= size) {
+            break;
+        }
+        used += (size_t)snprintf(word + used, size - used,
+                                 (i == 0u) ? "%02x" : ":%02x", mac[i]);
+    }
+}
+
+const char *bridge_usb_mac_word(void)
+{
+    static char word[18];
+
+    bridge_format_mac(tud_network_mac_address, word, sizeof(word));
+    return word;
+}
+
+const char *bridge_station_mac_word(void)
+{
+    static char word[18];
+#if BRIDGE_WIFI_ENABLE
+    struct netif *wn = bridge_wifi_netif();
+
+    if ((wn == NULL) || (wn->hwaddr_len != ETH_HWADDR_LEN)) {
+        return "(no radio)";
+    }
+    bridge_format_mac(wn->hwaddr, word, sizeof(word));
+    return word;
+#else
+    (void)word;
+    return "(no radio)";
+#endif
+}
+
+
 
 
 /* -------------------------------- diagnostics ---------------------------- */
@@ -1475,7 +1529,11 @@ void bridge_init(void)
 #if BRIDGE_NAT_ENABLE
         bridge_wifi_netif()->output = bridge_nat_output;
 #endif
+#if BRIDGE_WIFI_ENABLE
+        /* Ask for the first association attempt on the next poll rather than
+         * here, so a slow cyw43 firmware load is not inside the connect path. */
         wifi_retry_at = get_absolute_time();
+#endif
     }
     diagnostics_kick();                 /* cyw43 firmware load is the slow step */
 

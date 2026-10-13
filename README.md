@@ -16,13 +16,13 @@ your NIC     L2 bridge      your home network
 **`src/` now holds both data paths, and `src/config.h` picks one at build time.**
 `BRIDGE_L2_BRIDGE` (in `src/config.h`, default `0`) picks which data path is compiled:
 
-- `BRIDGE_L2_BRIDGE = 0` — the default, and what `build/` and the flashed board contain today:
-  an L3 router. One lwIP stack holding two interfaces, `IP_FORWARD`, a TinyUSB DHCP server and
-  source NAT.
+- `BRIDGE_L2_BRIDGE = 0` — the default for `build/`, and no longer what the board on the desk
+  runs: an L3 router. One lwIP stack holding two interfaces, `IP_FORWARD`, a TinyUSB DHCP server
+  and source NAT.
 - `BRIDGE_L2_BRIDGE = 1` — the transparent bridge the requirements ask for: Ethernet frames
   forwarded between the two ports, the host adopting the station's MAC, the station's own DHCP
-  client stopped, no NAT, no private subnet, no Pico-side lease. **Built and checked at the
-  symbol level; not yet flashed or hardware-tested.**
+  client stopped, no NAT, no private subnet, no Pico-side lease. **This is the image on the board
+  since 2026-10-13, and it is the one the acceptance criteria were measured on.**
 
 | netif | `BRIDGE_L2_BRIDGE = 0` (today) | `BRIDGE_L2_BRIDGE = 1` |
 |-------|--------------------------------|------------------------|
@@ -38,28 +38,28 @@ ninja -C build-l2
 ## Requirements reference vs. what is built today
 
 `openrouter-banana2-rpi-pico.png` is the **requirements reference** for this product: it says
-what the adapter must do. `src/` is today's implementation, and it does not yet meet most of
-that reference.
+what the adapter must do. `src/` is today's implementation. Since 2026-10-13 the board on the desk
+runs the L2 build (`-DBRIDGE_L2_BRIDGE=1`), so the first four rows below are read off that image.
 
-| Requirement (reference image) | Today in `src/` |
+| Requirement (reference image) | Today in `src/`, and what was read off the board |
 |-------------------------------|-----------------|
-| Transparent L2 bridging | in code, behind `-DBRIDGE_L2_BRIDGE=1`: `bridge_l2_forward()` hands each frame to the other port's `linkoutput`, and `IP_FORWARD` / both lwIP hooks are not defined in that build. The default build (`build/`, the flashed board) is still routed L3. **Not flashed, not hardware-tested** |
-| One MAC & one IP (the host adopts the Pico's Wi-Fi MAC) | in code, in the L2 build: `bridge_init_mac()` copies `w0->hwaddr` into `tud_network_mac_address`, and `bridge_init()` brings cyw43 up **before** `tusb_init()` so the descriptor carries it. The default build still uses a board-ID MAC (`02:ce:50:d8:db:52`) |
-| No NAT, no port-forwards | in code, in the L2 build: `BRIDGE_NAT_ENABLE` defaults to 0 there and `nat.c` contributes no symbols. The default build still runs NAT (`src/nat.c`, external ports from 50000) |
-| No private subnet | in code, in the L2 build: `u1` is added with no address, TinyUSB's DHCP server is not compiled, and the console prints `mode: transparent L2 bridge (no NAT, no lease)`. The default build is still `172.28.0.0/24` with an 8-address pool |
-| IPv4 & IPv6 | IPv4 only in both builds (`LWIP_IPV6 = 0`) |
-
-| WPA2-PSK & WPA3-SAE | in code: a profile with a passphrase joins in transition mode, `CYW43_AUTH_WPA3_WPA2_AES_PSK` (`bridge_profile_auth()`). Never associated with a real AP yet |
+| Transparent L2 bridging | **implemented and validated on hardware 2026-10-13**, behind `-DBRIDGE_L2_BRIDGE=1`: `bridge_l2_forward()` hands each frame to the other port's `linkoutput`, and `IP_FORWARD` / both lwIP hooks are not defined in that build. Read off the board with the station associated: `mode: transparent L2 bridge (no NAT, no lease)`, `->wifi 72 → 152` and `->host 87 → 170` across a wave of flows, and at a 1 MB download pinned to the bridge the host's NIC counted `+755` packets while the board reported `->host +745` frames — the same frames counted from two places. The default build still routes at L3 |
+| One MAC & one IP (the host adopts the Pico's Wi-Fi MAC) | **implemented and validated on hardware 2026-10-13**: console `mac: usb <station MAC> station <station MAC>`, kernel `cdc_ncm ... MAC-Address: <station MAC>`, interface `enx<MAC>`. The default build still uses a board-ID MAC (`02:ce:50:d8:db:52`) |
+| No NAT, no port-forwards | in code, in the L2 build: `BRIDGE_NAT_ENABLE` defaults to 0 there and `nat.c` contributes no symbols. **Read off the board: no `nat:` line in the status dump at all.** The default build still runs NAT (`src/nat.c`, external ports from 50000) |
+| No private subnet | **implemented and validated on hardware 2026-10-13**, in the L2 build: `u1` is added with no address, TinyUSB's DHCP server is not compiled. Read off the board: `wifi IP: (bridge: none)`, zero `172.28.0.x` addresses on the host, and the host holding **`<host address>/24` with gateway `<router>` and `dhcp_server_identifier = <router>`** — the lease comes from the Wi-Fi router. ARP on the bridge interface is resolved by the router (`<router> → <MAC-gateway>`) and by another Wi-Fi device, not by the Pico. The default build still runs `172.28.0.0/24` |
+| IPv4 & IPv6 | IPv4 only in both builds (`LWIP_IPV6 = 0`); the console prints `(ipv6 off)` instead of inventing an address. On the L2 bridge an IPv6 frame would pass through untouched — lwIP never sees it — but **end-to-end IPv6 is not validated**: on this AP the host interface only has a `fe80::` address it generated itself and `ping -6` through the bridge did not pass, so R6 end-to-end is unvalidated and cannot be satisfied by this AP |
+| WPA2-PSK & WPA3-SAE | in code: a profile with a passphrase joins in transition mode, `CYW43_AUTH_WPA3_WPA2_AES_PSK` (`bridge_profile_auth()`). **Associated through the console on the L2 build (2026-10-13)** — `set ssid` / `set pass` produced `link=up` and `status: associated` on a WPA2 AP. Never associated with a real WPA3-SAE AP |
 | Management console on `/dev/ttyACM0`, debug console on `/dev/ttyACM1` | **measured on hardware** (2026-10-10): `CFG_TUD_CDC = 2`, six interfaces in the descriptor, REPL on `ttyACM0`, `ttyACM1` silent until `set debug on` and then carrying the `stats:` line |
-| Runtime provisioning: profiles, `scan`/`join`/`save`, saved to flash | in code: 8 profiles, `cyw43_wifi_scan()`, settings in the last flash sector (magic + version + CRC32). Not yet exercised: the flashed board has 0 saved profiles |
+| Runtime provisioning: profiles, `scan`/`join`/`save`, saved to flash | **measured on hardware** (2026-10-10): `scan` listed real networks with RSSI and BSSID, `join` / `live` / `back` work, `set ssid` / `set pass` / `save` / `list` / `del` / `restore` work, and the station was associated from the console, not from the build. Persistence across a `.uf2` reflash was measured broken (2026-10-10) and **is now closed** (2026-10-12): the record sits at flash offset `0x3f0000`, 16 sectors below the top of the chip, and was read back intact straight out of flash (`test flash`, `test peek`) and with `list` after reflashing a different image. Not yet exercised: `use <n>` alternating between saved profiles. **Open defect:** the record the 2026-10-13 L2 validation ran with is no longer on flash — see the note under "Validating the L2 bridge" |
 | Watchdog, hard-fault handler, `RECOVERED from …` report | **measured on hardware** (2026-10-10): `test hang` → the board re-enumerated by itself and reported `RECOVERED from a hang` with `hangs=1`; `test fault` → `faultpc=0x10002572`, mapped by `addr2line` to the exact line that caused it; an lwIP assert reported with its own text |
-| LED: solid / 1 Hz / 5 Hz / double flash / off | **measured on hardware** (2026-10-10): 100 ms per tick, 0.100 s per edge at 5 Hz, 0.500 s half-period at 1 Hz, double flash and the two steady patterns with no edges. Not yet validated as a *choice* for `solid` / `1hz` / `double` (no association, no profile, no live scan) and never looked at directly |
-| ~4.5 Mbps throughput | **measured** (2026-10-10): 4 MB in 7.2 s = 4.4 Mbit/s, 20 MB in 32.9 s = 4.86 Mbit/s, with the flow pinned to the bridge interface. USB full-speed (12 Mbit/s) is the ceiling |
-| Concurrent-flow limit | **measured** (2026-10-10): 20 concurrent long-lived TCP connections pass 80/80 requests; with the NAT table at `64/64`, 54 of 66 requests on live connections get no reply. A web page fits, a desktop session with an agent running does not |
+| LED: solid / 1 Hz / 5 Hz / double flash / off | **measured on hardware** (2026-10-10): 100 ms per tick, 0.100 s per edge at 5 Hz, 0.500 s half-period at 1 Hz, double flash and the two steady patterns with no edges. Validated as a *choice* for `5hz` (the board's own state), `double` (a live scan), `solid` (a real association) and `1hz` (a saved profile that cannot associate). Not validated as a choice: `off` (it cannot be read from a host that is reading the console). Never looked at directly — the board is still in its case |
+| ~4.5 Mbps throughput | **measured on the L2 bridge** (2026-10-13): 1 MB at 503 kB/s, 5 MB at 558–700 kB/s, 10 MB at 604 kB/s in 17.4 s and 654 kB/s on a second run — **4.5–5.6 Mbit/s**. The 2026-10-10 run on the NAT bridge had given 4.4 and 4.86 Mbit/s. USB full-speed (12 Mbit/s) is the ceiling |
+| Concurrent-flow limit | **measured** (2026-10-10, NAT bridge): 20 concurrent long-lived TCP connections pass 80/80 requests; with the NAT table at `64/64`, 54 of 66 requests on live connections get no reply. **On the L2 bridge the limit is gone (2026-10-13): 80 of 80 flows pinned to the bridge got a reply, and there is no table to fill.** What remains is the download-side loss: `rxdrop` reached 6623 over the session — frames the USB side could not take |
 
 "In code" means the source exists and the build is clean. It does **not** mean validated.
-Measured on hardware means a line was read out of a board flashed with
-`build/pico2_wifi_card.uf2` on 2026-10-10. Traceability and the open decisions are in
+Measured on hardware means a line was read out of a flashed board: the runs of 2026-10-10 and
+2026-10-12 on `build/pico2_wifi_card.uf2`, and the runs of 2026-10-13 on
+`build-l2/pico2_wifi_card.uf2`. Traceability and the open decisions are in
 `.clinerules/00-requirements-baseline.md`.
 
 Traceability, open decisions and technical risks: `.clinerules/00-requirements-baseline.md`.
@@ -172,7 +172,36 @@ the Pico 2 (verified here: `/media/cezar/RP2350`, `INFO_UF2.TXT` → `Board-ID: 
 
 `build/_deps/picotool/picotool` is built by the SDK **without USB support**, so
 `picotool load -x build/pico2_wifi_card.uf2` needs a system `picotool` or a debug
-probe; the BOOTSEL copy above is what works with the vendored build.
+probe; the BOOTSEL copy above is what works with the vendored build. A `picotool`
+with USB support was built separately for the 2026-10-13 run (`/tmp/picotool-usb/picotool`,
+`3.4.0`), and the flashed image on this desk came from `picotool load -v -x` — the path
+that ignores the RP2350-E10 absolute blocks and therefore does not erase the last 4 kB
+of flash. `scripts/flash.sh` tries that path when it finds a `picotool` with USB support
+and falls back to the BOOTSEL copy otherwise.
+
+
+## Validating the L2 bridge
+
+```sh
+scripts/l2_validate.sh [interface] [flows]     # default: enx<station MAC>, 80 flows
+scripts/counter_monotonicity.py [rounds] [gap-sec]  # monotonic counters, one session on both ttys
+```
+
+One pass over the six acceptance criteria, in the same session, because read one at a
+time they say nothing: an interface carrying the station's MAC but no lease says nothing
+about the bridge, and a `ping` that works says nothing about the MAC. It takes a single
+console read, reuses it for every criterion, then compares `stats:` before / during /
+after a wave of flows pinned to the bridge with `SO_BINDTODEVICE`, so the host's wired
+NIC is never touched.
+
+**Open defect, open before any re-run.** At 07:2x on 2026-10-13 — the same day the criteria
+passed — `list` on the same board reported `0 saved (active: none)` and `restore` reported
+`nothing saved in flash @ 0x3f0000`, with `hangs=1` and `status: unconfigured`. The record
+that session was provisioned with is no longer on flash and no capture shows a `save` from
+it. The measured session stands; the board has to be re-provisioned before it can be read
+again. Analysis and the two candidate causes:
+`.clinerules/05-diagnostics-and-console.md`, "Defect deschis: recordul de configurare a dispărut
+de pe flash".
 
 
 ## Console
@@ -191,8 +220,13 @@ The debug stream is silent until `set debug on` is typed on `/dev/ttyACM0`. Once
 reports association changes and one stats line every `BRIDGE_STATUS_INTERVAL_MS`:
 
 ```
-stats: ->wifi=128 ->host=341 txdrop=0 rxdrop=0 refl=12 poolfail=0 ringpk=4 link=up hangs=0 faults=0 faultpc=0x00000000 freeram=424916 host=192.168.1.218
+stats: ->wifi=128 ->host=341 txdrop=0 wdrop=0 rxdrop=0 refl=12 poolfail=0 ringpk=4 link=up hangs=0 faults=0 faultpc=0x00000000 freeram=424916 host=192.168.1.218
 ```
+
+The fields are the specification's table 2 plus one more, `wdrop` (`bridge_stats.wifi_drop`:
+frames the Wi-Fi side refused *after* it had been chosen). Without it a bridge that loses frames
+on the radio looks identical to one that never received them. `wdrop` was added with the L2
+bridge; the lines quoted below were captured on the board before it existed and show no `wdrop`.
 
 `reboot` restarts the board from the console and `reboot bootsel` brings the BOOTSEL drive
 back, which is what makes reflashing possible without holding the button. Neither command is
@@ -278,9 +312,10 @@ key on, and on a truncated transport header — all reachable from ordinary host
 was not a corner case. The rule now written into `.clinerules/02-coding-standards.md`: a
 `netif->output` installed by `ip4_forward()` must not free the pbuf on any path.
 
-`stats:` has no field for `wifi_drop`, which is the counter a NAT-table exhaustion moves. The
-occupancy of the NAT table is now on the console state dump as `nat: <active>/<size> flows`;
-`wifi_drop` itself is still only on the UART0 status line.
+`stats:` now carries `wdrop` (`bridge_stats.wifi_drop`), the counter a NAT-table exhaustion
+moves, and the occupancy of the NAT table is on the console state dump as
+`nat: <active>/<size> flows`. Before both existed, a full table was only frames that never
+arrived.
 
 ### Why the host loses the internet when its wired NIC goes down
 
@@ -423,8 +458,11 @@ See `src/dhcp_notes.md` for why the DHCP server's replies need the route hook.
   and were measured on hardware (see `.clinerules/05-diagnostics-and-console.md`). The Wi-Fi
   side is validated too: the station associates with a real WPA2 access point, takes a lease
   from the router, and bridged traffic crosses the bridge under load (see
-  "The bridged path under load"). What remains measured-and-wrong is profile persistence across
-  a `.uf2` reflash, and what remains unvalidated is WPA3-SAE on a real access point.
-* `stats:` has no field for `wifi_drop`, the counter a NAT-table exhaustion moves. NAT table
-  occupancy is now visible as `nat: <active>/<size> flows` in the console state dump; a full
-  table is no longer only a silence.
+  "The bridged path under load"). Profile persistence across a `.uf2` reflash was measured
+  broken (2026-10-10) and is now fixed and re-measured: the record sits at flash offset
+  `0x3f0000`, sixteen sectors below the top of the chip, where the erase that accompanies an
+  RP2350 `.uf2` load no longer reaches it — verified by reading the record straight out of flash
+  (`test flash`, `test peek`) and by `list` after reflashing a different image. What remains
+  unvalidated is WPA3-SAE on a real access point.
+* A full NAT table used to be only a silence. Its occupancy is now on the console state dump as
+  `nat: <active>/<size> flows`, and the frames it refuses are counted as `wdrop` in `stats:`.

@@ -70,6 +70,12 @@ const char *bridge_link_word(void);
 const char *bridge_host_ipv4_word(void);
 const char *bridge_wifi_ipv4_word(void);
 const char *bridge_wifi_gateway_word(void);
+/* The Ethernet address TinyUSB is advertising on the host's interface, and the
+ * one the radio owns.  In the transparent bridge these must be the same number,
+ * and the match has to be readable on the console: the line bridge_init_mac()
+ * prints goes to UART0, and nothing is plugged into UART0 on this desk. */
+const char *bridge_usb_mac_word(void);
+const char *bridge_station_mac_word(void);
 
 void bridge_set_led(bool on);
 void bridge_print_status(void);
