@@ -67,6 +67,26 @@ Traceability, open decisions and technical risks: the requirements table above a
 `openrouter-console-design.md.bak` (the verbatim source text kept in this repo). Closing these
 gaps means changing `src/`, not rewording the requirements.
 
+### What the reference image says, verbatim
+
+Transcribed from `openrouter-banana2-rpi-pico.png` and re-checked against the image itself with
+`scripts/ocr_reference.py`, so the transcription is verifiable rather than trusted:
+
+| Label in the image | What it requires |
+|---|---|
+| "NO Host-Side Wi-Fi Stack", "cdc_ncm & cdc_acm drivers (in-box)" | driverless: the host uses only the in-box CDC drivers, no installed driver and no Wi-Fi stack on the host |
+| "USB CDC-NCM (Layer-2 Ethernet Frames)" | Ethernet frames carried over USB in NCM NTBs |
+| "Transparent L2 Bridging" | a level-2 bridge between the host and the Wi-Fi station; no IP terminated on the host's traffic |
+| "One MAC & One IP", "MAC ADOPTION & END-TO-END IDENTITY" | the host's USB interface adopts the Wi-Fi station's MAC, and the host receives the network's own address |
+| "No NAT, No Port-forwards" | no address or port rewriting, no NAT table, no inbound port-forwarding |
+| (consequence of "One MAC & One IP") | no private subnet: the host sits on the Wi-Fi router's own network |
+| "IPv4 & IPv6" | both protocols, end to end |
+| "WPA2-PSK & WPA3-SAE" | both, through a WPA2/WPA3 transition mode so either AP type can be joined |
+| "Out-of-band Management & Debug (over `/dev/ttyACM0`, `/dev/ttyACM1`)" | the console reachable from the host regardless of Wi-Fi state |
+| a `stats:` line with `->wifi`, `->host`, `txdrop`, `rxdrop`, `refl`, `poolfail`, `ringpk`, `link`, `hangs`, `faults`, `faultpc`, `freeram`, `host` | per-frame counters, plus a per-frame trace as a build option (`-DTRACE_FRAMES=1`) |
+| five LED patterns | solid / 1 Hz / 5 Hz / double flash / off |
+| "~4.5 Mbps Throughput", "~MBbpTBN" | throughput. The first figure is measured (4.5–5.6 Mbit/s on the L2 bridge). **The second label is unreadable in the image and is an open question, not a spec** |
+
 ## Closing the gap: what the bridge needs, checked against the vendored SDK
 
 - **lwIP already ships an IEEE 802.1D bridge.** `bridgeif.c` and `bridgeif_fdb.c` are part of
