@@ -265,7 +265,13 @@ after `back`:
     [back   ] driven=5hz     level=on  tick= 1  state asks=5hz     match
 ```
 
-`solid` and `1hz` still need a real association or a saved profile to be checked as choices.
+`solid` and `1hz` were confirmed the same way later, once a real association existed
+(`led: solid level on state asks solid`) and with a saved profile that cannot join
+(`led: 1hz level off state asks 1hz`, `wifi down profiles 1`). `scripts/led_state_matrix.py`
+walks the board through every state of table 3 in one run — `solid` needs `--ssid` / `--pass`,
+`1hz` needs `--dead` — and reports the chooser's decision for each; credentials are arguments,
+never literals. Only `off` remains unreadable: it is the state where USB is not ready, so no host
+is left that could read it.
 
 `test` exists only in that build. `build/` contains no `cmd_test` and no `test` string, and the
 flashed reference image answers `test` with `[!] unknown command "test"`.
