@@ -92,7 +92,8 @@ def open_synced(device, open_tries=3):
         try:
             ser = serial.Serial(port=device, baudrate=115200, timeout=0.2)
         except Exception as exc:
-            print("[%s] open failed (try %d): %s" % (device, attempt), file=sys.stderr)
+            print("[%s] open failed (try %d): %s" % (device, attempt, exc),
+                  file=sys.stderr)
             time.sleep(2.0)
             continue
 

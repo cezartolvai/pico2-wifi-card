@@ -20,6 +20,7 @@
 #include "cyw43.h"
 #include "pico/cyw43_arch.h"
 #include "hardware/flash.h"
+#include "hardware/sync.h"   /* save_and_disable_interrupts() around the flash write */
 
 #include "bridge.h"
 #include "config.h"
@@ -124,12 +125,58 @@ static bool settings_save(const bridge_settings_t *in)
     memcpy(settings_image + SETTINGS_HDR, in, sizeof(*in));
 
     /* Erasing and programming take XIP away for a few tens of ms.  The SDK's
-     * helpers are copied to RAM and put XIP back afterwards, so this is safe
-     * from the poll loop - and it is why persistence happens on `save` and
-     * never in the data path. */
+     * helpers are copied to RAM and put XIP back afterwards, so the code doing
+     * the write survives the window - but nothing else in the image is told to
+     * stay out of flash while flash is not readable.  Two live handlers do live
+     * in flash on this board, and both are reachable from the poll loop:
+     *
+     *   cyw43_gpio_irq_handler  (arm-none-eabi-nm: 0x10014f94, i.e. XIP) -
+     *       registered by cyw43_irq_init() on CYW43_PIN_WL_HOST_WAKE through
+     *       gpio_add_raw_irq_handler_with_order_priority(), and enabled as a
+     *       LEVEL_HIGH irq by cyw43_set_irq_enabled(), with IO_IRQ_BANK0 on
+     *       (pico_cyw43_driver/cyw43_driver.c:47 and :67);
+     *   isr_hardfault / diagnostics_fault (0x10002ef4 / 0x10002f08, both XIP),
+     *   and watchdog_reboot() itself (0x10004868, XIP).
+     *
+     * A LEVEL_HIGH irq re-fires for as long as the radio has work pending, so a
+     * host-wake level inside the erase window is not one unlucky edge but a
+     * repeating one, and its handler is fetched from a flash that is in command
+     * mode.  The fault handler cannot run either, because it is in the same
+     * flash, and neither can the reboot it would call: the core locks up, the
+     * watchdog reboots, and the record is left as `hangs=1 faults=0 faultpc=0`
+     * with the sector erased and never programmed - which is the exact signature
+     * read on 2026-10-13.  Interrupts are therefore held off for the whole write.
+     *
+     * Holding them is cheap: cyw43 services the wake pin from cyw43_arch_poll()
+     * as well as from the handler, TinyUSB's own handler is RAM-resident and its
+     * events are queued, and BRIDGE_WATCHDOG_MS (4000 ms) is far above the tens
+     * of ms this write takes. */
+    uint32_t irq_save = save_and_disable_interrupts();
+
     flash_range_erase(SETTINGS_OFFS, SETTINGS_SECTOR);
     flash_range_program(SETTINGS_OFFS, settings_image, settings_program_bytes());
-    return true;
+    restore_interrupts_from_disabled(irq_save);
+
+    /* Read the sector back out of XIP and judge it the way settings_load()
+     * would.  Without this, `save` cannot fail: it printed "[*] saved to flash"
+     * for a write that never landed, which is how a missing record looked like a
+     * mystery instead of a reported error. */
+    const uint8_t *written = (const uint8_t *)(XIP_BASE + SETTINGS_OFFS);
+    uint32_t rb_magic   = 0u;
+    uint32_t rb_version = 0u;
+    uint32_t rb_crc     = 0u;
+
+    memcpy(&rb_magic,   written,       4u);
+    memcpy(&rb_version, written + 4u,  4u);
+    memcpy(&rb_crc,     written + 12u, 4u);
+
+    if ((rb_magic != SETTINGS_MAGIC) || (rb_version != SETTINGS_VERSION)) {
+        return false;
+    }
+    if (crc32((const uint8_t *)&rec, sizeof(rec)) != rb_crc) {
+        return false;
+    }
+    return (memcmp(written + SETTINGS_HDR, &rec, sizeof(rec)) == 0);
 }
 
 /* ------------------------------ console output ---------------------------- */
@@ -381,6 +428,10 @@ static void scan_start(void)
 #endif
 }
 
+/* Only reachable from scan_service()'s BRIDGE_WIFI_ENABLE branch: with no radio
+ * there is no scan to report, and a static function nobody calls is a warning in
+ * the USB-only build. */
+#if BRIDGE_WIFI_ENABLE
 static void scan_report(void)
 {
     scan_running = false;
@@ -398,6 +449,8 @@ static void scan_report(void)
     }
     console_flush(ITF_MGMT);
 }
+#endif
+
 
 /* A cyw43 scan finishes asynchronously: the results arrive through the callback
  * while cyw43_arch_poll() runs, so the report is emitted from the poll loop and
