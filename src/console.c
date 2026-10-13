@@ -181,12 +181,43 @@ static bool settings_save(const bridge_settings_t *in)
 }
 
 /* ------------------------------ console output ---------------------------- */
+/* Largest block any caller hands down: console_printf()'s own buffer.  The CRLF
+ * expansion below needs room for a carriage return per line. */
+#define CONSOLE_TX_MAX        384u
+
+/* Terminals need CRLF, and this firmware cannot assume the terminal adds it.
+ * picocom's default output mapping is empty - `omap is :` in its own header -
+ * so a bare '\n' only moves the cursor down one line and leaves the cursor at
+ * whatever column the previous line ended on.  Every format string in this file
+ * ended its lines with a bare '\n', which is how the state dump reached a real
+ * terminal as a staircase of ragged lines.  Converting here, at the one place
+ * every console byte passes through, means no format string has to remember it,
+ * and a line that already ends in CRLF is not doubled. */
 static void console_write(uint8_t itf, const char *s, size_t n)
 {
+    static char crlf[2 * CONSOLE_TX_MAX];
+    size_t out = 0u;
+    char prev = '\0';
+
     if (!tud_cdc_n_ready(itf)) {
         return;                     /* no console yet: drop, never block */
     }
-    tud_cdc_n_write(itf, s, n);
+    if (memchr(s, '\n', n) == NULL) {
+        tud_cdc_n_write(itf, s, n); /* no line ends here: nothing to expand */
+        return;
+    }
+    for (size_t i = 0u; (i < n) && (out < sizeof(crlf)); i++) {
+        char c = s[i];
+
+        if ((c == '\n') && (prev != '\r')) {
+            crlf[out++] = '\r';
+        }
+        crlf[out++] = c;
+        prev = c;
+    }
+    if (out > 0u) {
+        tud_cdc_n_write(itf, crlf, out);
+    }
 }
 
 static void console_write_str(uint8_t itf, const char *s)
@@ -409,7 +440,9 @@ static int console_scan_cb(void *env, const cyw43_ev_scan_result_t *r)
 }
 #endif
 
-static void scan_start(void)
+/* Returns true when a scan is now in flight.  The caller needs to know, because
+ * the results cannot be printed here: they arrive later, through scan_service(). */
+static bool scan_start(void)
 {
 #if BRIDGE_WIFI_ENABLE
     scan_count = 0u;
@@ -419,13 +452,15 @@ static void scan_start(void)
     memset(&opts, 0, sizeof(opts));
     if (cyw43_wifi_scan(&cyw43_state, &opts, NULL, console_scan_cb) != 0) {
         console_write_str(ITF_MGMT, "[!] scan failed: radio busy\n");
-        return;
+        return false;               /* nothing will report: the caller must prompt */
     }
     scan_running = true;
     console_write_str(ITF_MGMT, "[*] scanning...\n");
     console_flush(ITF_MGMT);
+    return true;
 #else
     console_write_str(ITF_MGMT, "[!] no radio in this build\n");
+    return false;
 #endif
 }
 
@@ -437,17 +472,29 @@ static void scan_report(void)
 {
     scan_running = false;
 
-    console_printf(ITF_MGMT, "    networks (%u):\n", (unsigned)scan_count);
-    for (uint8_t i = 0u; i < scan_count; i++) {
-        console_printf(ITF_MGMT, "      %2d  %-*s  %4d dBm  %02x:%02x:%02x:%02x:%02x:%02x\n",
-                       (int)i + 1, BRIDGE_SSID_MAX_LEN, scan_list[i].ssid,
-                       (int)scan_list[i].rssi,
-                       scan_list[i].bssid[0], scan_list[i].bssid[1], scan_list[i].bssid[2],
-                       scan_list[i].bssid[3], scan_list[i].bssid[4], scan_list[i].bssid[5]);
+    /* In live mode console_scan_cb() has already printed every network as it
+     * arrived, so collecting and printing the list again showed every network
+     * twice on the same screen. */
+    if (scan_live) {
+        console_write_str(ITF_MGMT, "      (live: press a key to stop)\n");
+    } else {
+        console_printf(ITF_MGMT, "    networks (%u):\n", (unsigned)scan_count);
+        for (uint8_t i = 0u; i < scan_count; i++) {
+            console_printf(ITF_MGMT, "      %2d  %-*s  %4d dBm  %02x:%02x:%02x:%02x:%02x:%02x\n",
+                           (int)i + 1, BRIDGE_SSID_MAX_LEN, scan_list[i].ssid,
+                           (int)scan_list[i].rssi,
+                           scan_list[i].bssid[0], scan_list[i].bssid[1], scan_list[i].bssid[2],
+                           scan_list[i].bssid[3], scan_list[i].bssid[4], scan_list[i].bssid[5]);
+        }
+        if (scan_count == 0u) {
+            console_write_str(ITF_MGMT, "      (none found)\n");
+        }
     }
-    if (scan_count == 0u) {
-        console_write_str(ITF_MGMT, "      (none found)\n");
-    }
+    /* The prompt belongs after the results.  A scan finishes asynchronously - the
+     * list arrives from the poll loop, not from the command that started it - so
+     * printing the prompt before this report put it *above* the network list, and
+     * `scan` read as a prompt followed by a list that had not been asked for. */
+    console_prompt();
     console_flush(ITF_MGMT);
 }
 #endif
@@ -794,6 +841,7 @@ static void console_exec(void)
 {
     char *cursor = line;
     char *verb = next_token(&cursor);
+    bool scan_in_flight = false;
 
     if (verb == NULL) {
         /* An empty line just reprints the state. It must still end with the
@@ -829,12 +877,12 @@ static void console_exec(void)
     } else if (strcmp(cmd, "del") == 0) {
         cmd_index("del", cursor);
     } else if (strcmp(cmd, "scan") == 0) {
-        scan_start();
+        scan_in_flight = scan_start();
     } else if (strcmp(cmd, "join") == 0) {
         scan_join(cursor);
     } else if (strcmp(cmd, "live") == 0) {
         scan_live = true;
-        scan_start();
+        scan_in_flight = scan_start();
     } else if (strcmp(cmd, "back") == 0) {
         scan_menu = false;
         scan_live = false;
@@ -892,8 +940,14 @@ static void console_exec(void)
         console_printf(ITF_MGMT, "[!] unknown command \"%s\"\n", cmd);
     }
 
-    console_dump_state();
-    console_prompt();
+    /* A scan that is still running has produced nothing to show yet: its report
+     * arrives from scan_service() once cyw43_arch_poll() has drained the radio.
+     * Dumping the state and prompting now would put both above that report, which
+     * is exactly the order `scan` produced on a terminal. */
+    if (!scan_in_flight) {
+        console_dump_state();
+        console_prompt();
+    }
     console_flush(ITF_MGMT);
 }
 
@@ -1079,21 +1133,37 @@ void console_poll(void)
     scan_service();
 
     if (!tud_cdc_n_ready(ITF_MGMT)) {
-        console_up = false;
+        console_up   = false;
+        banner_shown = false;
         return;                     /* console not enumerated yet */
     }
     if (!console_up || line_reset) {
         /* A new session.  A half-typed line left over from the previous one, and
          * any byte the host sent while the board was rebooting or busy, must not
          * become a command in this one - a stale tail is how a console looks like
-         * it is answering a command nobody typed. */
-        console_up  = true;
-        line_reset  = false;
-        line_len    = 0u;
-        last_char   = 0;
+         * it is answering a command nobody typed.  The banner is re-armed too:
+         * `tud_cdc_n_ready()` turns true at enumeration, long before anyone opens
+         * the port, so a banner armed once at boot was spent on nobody and a fresh
+         * `picocom` showed an empty screen until the first keystroke. */
+        console_up   = true;
+        line_reset   = false;
+        line_len     = 0u;
+        last_char    = 0;
+        banner_shown = false;
+        /* The scan sub-menu is a REPL state, and a session boundary ends it.  Left
+         * set, the next session opened inside the sub-menu: the console asked for
+         * `(back|join|scan|live) #` when nothing was scanning, and `list` or `save`
+         * there are not commands. */
+        scan_menu  = false;
+        scan_live  = false;
+        scan_running = false;
         tud_cdc_n_read_flush(ITF_MGMT);
     }
-    if (!banner_shown) {
+    /* Greet the session, not the boot.  Raising DTR is what a terminal does when
+     * it opens - picocom, screen and pyserial all do it - so that is the signal
+     * that someone is actually reading.  A host that never raises DTR still gets
+     * the banner: the first byte it sends is handled below, before its echo. */
+    if (!banner_shown && tud_cdc_n_connected(ITF_MGMT)) {
         banner_shown = true;
         console_banner();
         console_dump_state();
@@ -1103,6 +1173,12 @@ void console_poll(void)
 
     int32_t c;
     while ((c = tud_cdc_n_read_char(ITF_MGMT)) >= 0) {
+        if (!banner_shown) {
+            banner_shown = true;
+            console_banner();
+            console_dump_state();
+            console_prompt();
+        }
         console_char((char)c);
     }
     console_flush(ITF_MGMT);

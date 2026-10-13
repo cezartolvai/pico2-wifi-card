@@ -321,6 +321,16 @@ picocom /dev/ttyACM1            # debug stream: mute until `set debug on`
 picocom -b 115200 /dev/ttyUSB0  # UART0 mirror of the same state
 ```
 
+Opening the console greets you: the banner, the full state dump and the prompt arrive
+before you type anything, and every line ends with CRLF. Both are firmware behaviour, not
+terminal settings - picocom's default output mapping is empty, so it does not add the
+carriage return for the board. A terminal that receives a bare newline starts each line
+wherever the previous one ended, which is how the state dump used to reach a host as a
+staircase of ragged lines.
+
+The scan sub-menu ends when the session ends, so a fresh `picocom` starts at
+`(set|scan|list|use|save) #` and not inside a sub-menu left behind by the previous session.
+
 The debug stream is silent until `set debug on` is typed on `/dev/ttyACM0`. Once on, it
 reports association changes and one stats line every `BRIDGE_STATUS_INTERVAL_MS`:
 
