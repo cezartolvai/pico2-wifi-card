@@ -10,6 +10,60 @@ your NIC     L2 bridge      your home network
              one MAC        one lease, from your router
 ```
 
+**The idea, the architecture and the console design are not ours.**
+
+This project follows **SBolinha's `pico-usb-wifi-pico2w`**
+(<https://github.com/SBolinha/pico-usb-wifi-pico2w>), a validated Pico 2 W (RP2350) port of
+**baiyibai's `pico-usb-wifi`** (<https://gitlab.com/baiyibai/pico-usb-wifi>), MIT-licensed. That
+project is not a vague inspiration credited and set aside: it already implements what this
+repository describes as its target, and the overlap is specific, not thematic.
+
+| Stated in this repository | Already in that project |
+|---|---|
+| transparent Layer-2 bridge, no NAT, no separate USB subnet | its declared architecture, validated on a Pico 2 W |
+| the host's USB interface adopts the Wi-Fi station's MAC | its declared design ("one MAC and one IP identity end to end") |
+| a management console and a write-only debug stream on two CDC-ACM functions | `serial_console.c` (instance 0) and `debug_console.c` (instance 1), `CFG_TUD_CDC 2` |
+| `stats:` with `->wifi`, `->host`, `txdrop`, `rxdrop`, `refl`, `poolfail`, `ringpk`, `link`, `hangs`, `faults`, `faultpc`, `freeram`, `host` | the same field list, in the same order; this project adds one field, `wdrop`, for frames the Wi-Fi side refused after it had been chosen |
+| five LED patterns: solid, 1 Hz, 5 Hz, double flash, off | the same five, with the same meanings |
+| watchdog recovery, crash counters in RAM the C runtime does not zero, `faultpc` for `addr2line` | the same mechanism: a `crashlog` in `.uninitialized_data`, a `naked` `isr_hardfault`, `watchdog_reboot()` |
+| 4000 ms watchdog, re-join every 10 s | `WDT_TIMEOUT_MS 4000u`, a 10 s re-join interval |
+
+**`openrouter-banana2-rpi-pico.png`, the requirements reference of this repository, describes that
+design.** It is not an independent statement of requirements written here, and this project does
+not claim otherwise.
+
+What this repository adds is its own implementation of that design, plus measurements and defects
+of its own:
+
+- a second data path kept beside the bridge (`BRIDGE_L2_BRIDGE`), so the routed/NAT variant and
+  the transparent one are the same firmware built two ways;
+- provisioning as written here: profiles in flash at `0x3f0000`, `scan` / `join` / `live`, and the
+  finding that a `.uf2` load on RP2350 erases the last sector of the chip, which is what moved the
+  settings record to `0x3f0000`;
+- defects found and closed by reading them off this board: an IP checksum written as zero by a
+  fixup that did not clear the field first, a double free on the `nat_snat()` failure path, and a
+  console reply truncated past its buffer;
+- the measurements quoted throughout, each one read off the board: throughput, concurrent-flow
+  behaviour, bridge counters compared against the host's own NIC, LED timings, watchdog and
+  hard-fault recovery.
+
+The reference project is MIT-licensed. **No code was taken from it** — nothing in `src/` came from
+that repository, and the file layout, the data path and the console implementation are written
+here. The idea and the architecture are theirs and are credited here for that reason; the
+implementation, every number quoted here and every limitation listed at the end are this
+project's own, and so is any defect in them.
+
+One finding of theirs that this project must state rather than pass over. They report that TinyUSB
+**0.18.0** enumerated but left the host's NCM interface inactive, and that **0.19.0** was required
+for end-to-end networking — on a **macOS** host. This project builds against **TinyUSB 0.18.0**,
+the version vendored by Pico SDK 2.3.1, and everything claimed here was measured on a **Linux**
+host, where 0.18.0 demonstrably works: the device enumerates, `cdc_ncm` binds, the host takes a
+lease, traffic crosses the bridge. **macOS and Windows have never been tested here.** This project
+does not contradict their finding; it shares their TinyUSB version and leaves the same hosts
+untested, which is a risk carried forward, not a refutation.
+
+
+
 **Target: a network card, not a router.** Recorded in the requirements decision of
 2026-10-09: the host must sit directly on the Wi-Fi network's own network.
 
@@ -83,9 +137,18 @@ Transcribed from `openrouter-banana2-rpi-pico.png` and re-checked against the im
 | "IPv4 & IPv6" | both protocols, end to end |
 | "WPA2-PSK & WPA3-SAE" | both, through a WPA2/WPA3 transition mode so either AP type can be joined |
 | "Out-of-band Management & Debug (over `/dev/ttyACM0`, `/dev/ttyACM1`)" | the console reachable from the host regardless of Wi-Fi state |
-| a `stats:` line with `->wifi`, `->host`, `txdrop`, `rxdrop`, `refl`, `poolfail`, `ringpk`, `link`, `hangs`, `faults`, `faultpc`, `freeram`, `host` | per-frame counters, plus a per-frame trace as a build option (`-DTRACE_FRAMES=1`) |
-| five LED patterns | solid / 1 Hz / 5 Hz / double flash / off |
+| five LED patterns | **four are legible in the image** — `Solid | Associated`, `Slow Blink | Configured, Associating`, `Fast Blink | No Wi-Fi`, `off = USB not ready`. The fifth, `Double flash`, is not legible in the image; it comes from `openrouter-console-design.md.bak`, which lists it as "two quick pulses, then a pause" for a live scan |
 | "~4.5 Mbps Throughput", "~MBbpTBN" | throughput. The first figure is measured (4.5–5.6 Mbit/s on the L2 bridge). **The second label is unreadable in the image and is an open question, not a spec** |
+
+Two things this table does **not** take from the image, because the image does not contain them
+legibly:
+
+- the `stats:` line and its counters (`->wifi`, `->host`, `txdrop`, `rxdrop`, `refl`, `poolfail`,
+  `ringpk`, `link`, `hangs`, `faults`, `faultpc`, `freeram`, `host`). OCR returns none of those
+  field names from the image. They come from `openrouter-console-design.md.bak`, which is the
+  console specification this repository has to meet.
+- the fifth LED pattern, as noted above.
+
 
 ## Closing the gap: what the bridge needs, checked against the vendored SDK
 
