@@ -913,6 +913,13 @@ static void console_exec(void)
         bridge_format_stats(stats_line, sizeof(stats_line));
         console_write_str(ITF_MGMT, stats_line);
         console_write(ITF_MGMT, "\n", 1u);
+    } else if (strcmp(cmd, "status") == 0) {
+        /* Not in the specification's table, but it is the first word a reader
+         * types: the state dump is what every other command already prints, so
+         * asking for it by name should not answer "unknown command".  The dump
+         * and the prompt come from the end of this function, like every other
+         * command. */
+        next_token(&cursor);        /* accept, and ignore anything typed after it */
     } else if (strcmp(cmd, "reboot") == 0) {
         /* Not in the specification's table: this bridge is reflashed a lot while
          * it is being debugged, and `reboot bootsel` brings the BOOTSEL drive
@@ -932,7 +939,7 @@ static void console_exec(void)
         console_write_str(ITF_MGMT,
                           "    set ssid|pass|country|debug    list|use|del\n"
                           "    scan  join <n>  live  back\n"
-                          "    save  restore  stats  reboot [bootsel]  help\n");
+                          "    save  restore  status  stats  reboot [bootsel]  help\n");
 #if BRIDGE_SELFTEST
         console_write_str(ITF_MGMT, "    test hang|fault|assert|led   (self-test build)\n");
 #endif

@@ -316,7 +316,7 @@ console on `/dev/ttyACM0` and the debug stream on `/dev/ttyACM1`. UART0 is kept 
 mirror of the same state: GPIO0 = TX, GPIO1 = RX, 115200 8N1.
 
 ```sh
-picocom /dev/ttyACM0            # management: set / list / scan / join / save / stats
+picocom /dev/ttyACM0            # management: set / list / scan / join / save / status / stats
 picocom /dev/ttyACM1            # debug stream: mute until `set debug on`
 picocom -b 115200 /dev/ttyUSB0  # UART0 mirror of the same state
 ```
