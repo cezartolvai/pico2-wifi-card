@@ -27,3 +27,6 @@ bridge-credentials.cmake
 
 # Regulile locale ale agentului (documentația de lucru Cline). Rămân pe disc, nu se publică.
 .clinerules/
+
+# Local editor configuration.
+.vscode/
