@@ -50,7 +50,7 @@ runs the L2 build (`-DBRIDGE_L2_BRIDGE=1`), so the first four rows below are rea
 | IPv4 & IPv6 | IPv4 only in both builds (`LWIP_IPV6 = 0`); the console prints `(ipv6 off)` instead of inventing an address. On the L2 bridge an IPv6 frame would pass through untouched — lwIP never sees it — but **end-to-end IPv6 is not validated**: on this AP the host interface only has a `fe80::` address it generated itself and `ping -6` through the bridge did not pass, so R6 end-to-end is unvalidated and cannot be satisfied by this AP |
 | WPA2-PSK & WPA3-SAE | in code: a profile with a passphrase joins in transition mode, `CYW43_AUTH_WPA3_WPA2_AES_PSK` (`bridge_profile_auth()`). **Associated through the console on the L2 build (2026-10-13)** — `set ssid` / `set pass` produced `link=up` and `status: associated` on a WPA2 AP. Never associated with a real WPA3-SAE AP |
 | Management console on `/dev/ttyACM0`, debug console on `/dev/ttyACM1` | **measured on hardware** (2026-10-10): `CFG_TUD_CDC = 2`, six interfaces in the descriptor, REPL on `ttyACM0`, `ttyACM1` silent until `set debug on` and then carrying the `stats:` line |
-| Runtime provisioning: profiles, `scan`/`join`/`save`, saved to flash | **measured on hardware** (2026-10-10): `scan` listed real networks with RSSI and BSSID, `join` / `live` / `back` work, `set ssid` / `set pass` / `save` / `list` / `del` / `restore` work, and the station was associated from the console, not from the build. Persistence across a `.uf2` reflash was measured broken (2026-10-10) and **is now closed** (2026-10-12): the record sits at flash offset `0x3f0000`, 16 sectors below the top of the chip, and was read back intact straight out of flash (`test flash`, `test peek`) and with `list` after reflashing a different image. Not yet exercised: `use <n>` alternating between saved profiles. **Open defect:** the record the 2026-10-13 L2 validation ran with is no longer on flash — see the note under "Validating the L2 bridge" |
+| Runtime provisioning: profiles, `scan`/`join`/`save`, saved to flash | **measured on hardware** (2026-10-10): `scan` listed real networks with RSSI and BSSID, `join` / `live` / `back` work, `set ssid` / `set pass` / `save` / `list` / `del` / `restore` work, and the station was associated from the console, not from the build. Persistence across a `.uf2` reflash was measured broken (2026-10-10) and **is now closed** (2026-10-12): the record sits at flash offset `0x3f0000`, 16 sectors below the top of the chip, and was read back intact straight out of flash (`test flash`, `test peek`) and with `list` after reflashing a different image — most recently with a real network provisioned on 2026-10-13 (`1 saved (active: active)`, `ssid: <SSID>`, `status: associated`). Not yet exercised: `use <n>` alternating between saved profiles. **Open defect, diagnosed but unresolved:** a record vanished from flash on 2026-10-13; four candidate causes were disproved on hardware and `settings_save()` now holds interrupts off across the write and verifies the sector after writing it — see the note under "Validating the L2 bridge" |
 | Watchdog, hard-fault handler, `RECOVERED from …` report | **measured on hardware** (2026-10-10): `test hang` → the board re-enumerated by itself and reported `RECOVERED from a hang` with `hangs=1`; `test fault` → `faultpc=0x10002572`, mapped by `addr2line` to the exact line that caused it; an lwIP assert reported with its own text |
 | LED: solid / 1 Hz / 5 Hz / double flash / off | **measured on hardware** (2026-10-10): 100 ms per tick, 0.100 s per edge at 5 Hz, 0.500 s half-period at 1 Hz, double flash and the two steady patterns with no edges. Validated as a *choice* for `5hz` (the board's own state), `double` (a live scan), `solid` (a real association) and `1hz` (a saved profile that cannot associate). Not validated as a choice: `off` (it cannot be read from a host that is reading the console). Never looked at directly — the board is still in its case |
 | ~4.5 Mbps throughput | **measured on the L2 bridge** (2026-10-13): 1 MB at 503 kB/s, 5 MB at 558–700 kB/s, 10 MB at 604 kB/s in 17.4 s and 654 kB/s on a second run — **4.5–5.6 Mbit/s**. The 2026-10-10 run on the NAT bridge had given 4.4 and 4.86 Mbit/s. USB full-speed (12 Mbit/s) is the ceiling |
@@ -194,14 +194,32 @@ console read, reuses it for every criterion, then compares `stats:` before / dur
 after a wave of flows pinned to the bridge with `SO_BINDTODEVICE`, so the host's wired
 NIC is never touched.
 
-**Open defect, open before any re-run.** At 07:2x on 2026-10-13 — the same day the criteria
-passed — `list` on the same board reported `0 saved (active: none)` and `restore` reported
-`nothing saved in flash @ 0x3f0000`, with `hangs=1` and `status: unconfigured`. The record
-that session was provisioned with is no longer on flash and no capture shows a `save` from
-it. The measured session stands; the board has to be re-provisioned before it can be read
-again. Analysis and the two candidate causes:
-`.clinerules/05-diagnostics-and-console.md`, "Defect deschis: recordul de configurare a dispărut
-de pe flash".
+**The defect, and how far the diagnosis got.** At 07:2x on 2026-10-13 — the same day the
+criteria passed — `list` on the same board reported `0 saved (active: none)` and `restore`
+reported `nothing saved in flash @ 0x3f0000`, with `hangs=1` and `status: unconfigured`. The
+record that session was provisioned with was no longer on flash, and no capture showed a `save`
+from it.
+
+`build-selftest-l2` (`-DBRIDGE_SELFTEST=1 -DBRIDGE_L2_BRIDGE=1`) put `test flash` on the same
+data path that lost the record, so the sector could be read directly instead of inferred, and
+`scripts/persistence_probe.sh` / `scripts/provision_and_probe.sh` ran the whole chain. At boot on
+the defective board: `record @ 0x3f0000 erased magic 0xffffffff crc bad`. Every probe after that
+left the sector valid — `save` with the radio unassociated, `save` ×5 during a live scan, a
+console `reboot`, `test hang` repeated (watchdog real, `hangs` 1 → 2 → 3), a `.uf2` reflash, and
+finally `save` **with the station associated and 80 flows crossing the bridge**
+(`->wifi 539`, `->host 2752`, `rxdrop 1344`), followed by a reboot: `crc ok` at every step.
+
+**Four candidate causes are therefore disproved on hardware**, and the signature the XIP-window
+hypothesis predicts (`hangs=1 faults=0 faultpc=0x00000000` with the sector erased and never
+programmed) did not appear in any window tested. The hypothesis remains the most plausible
+explanation of what was seen that morning; **the cause is still unconfirmed**. What changed in
+code regardless: `settings_save()` now holds interrupts off across the whole erase+program and
+reads the sector back before reporting success, so `save` can fail and says so.
+Analysis: `.clinerules/05-diagnostics-and-console.md`, "Fereastra decisivă a fost rulată".
+
+**Not implemented, and worth deciding:** a dual-slot (A/B) settings record. With four windows
+tested and the sector valid in all of them, the interrupt guard is the only real defence; an A/B
+record would make an interrupted save structurally impossible instead of merely unlikely.
 
 
 ## Console
@@ -362,15 +380,23 @@ touching the wired NIC: `ping -I <interface>` uses `SO_BINDTODEVICE`, so the tes
 through the bridge while the host keeps its wired default route.
 
 ```sh
-nmcli connection modify "Wired connection 4" ipv4.route-metric 600
-nmcli connection up "Wired connection 4"
+nmcli connection show --active                  # the bridge profile's NAME changes with the MAC
+nmcli connection modify "Wired connection 5" ipv4.route-metric 600
+nmcli connection up "Wired connection 5"
 ip route get 1.1.1.1                        # must show enp7s0, not enx...
-scripts/pinned_flow.sh enx02ce50d8db52 40   # 40 new flows, wired NIC untouched
+scripts/pinned_flow.sh enx<adopted MAC> 40   # 40 new flows, wired NIC untouched
 ```
 
 Measured 2026-10-10 with the wired NIC untouched (metrics 105 wired / 600 bridge): **40 new
 flows out of 40 succeeded**, `nat: 43/64`, `poolfail=0`, `faults=0`, `hangs=0`, host
 `RX 9053 pk / errors 0 dropped 0`.
+
+**The bridge profile's name is not stable.** NetworkManager creates a fresh profile every time
+the adopted MAC changes, so the CDC-NCM interface's profile was `Wired connection 4` while the MAC
+came from the board ID and became **`Wired connection 5`** once the L2 build adopted the station's
+MAC. Read it from `nmcli connection show --active`; do not memorise it. **State on the bench now
+(2026-10-13, evening):** bridge at `ipv4.route-metric 600`, the wired NIC preferred at metric 109,
+`ip route get 1.1.1.1` ⇒ `via <router> dev enp7s0 src <wired NIC address>`.
 
 This is a mitigation, not the requirement. The requirements reference asks for a transparent L2
 bridge with one MAC and one address and **no NAT**; a per-flow table with a fixed size is a
@@ -391,7 +417,10 @@ consequence of the L3 + NAT design that the requirement says must go away.
 > One thing measured and **wrong**: a saved profile survives a reset but **does not survive
 > reflashing the `.uf2`** — after the copy, `list` and `restore` both report 0 profiles, even
 > though the image occupies the first ~342 kB of a 4 MB chip and the record lives in the last
-> 4 kB sector. Tracked in `.clinerules/05-diagnostics-and-console.md`.
+> 4 kB sector. **Closed 2026-10-12:** the record was moved to flash offset `0x3f0000`, sixteen
+> sectors below the top of the chip, out of reach of the erase that accompanies an RP2350
+> `.uf2` load, and it survived reflashes since. A separate, unexplained loss of the record on
+> 2026-10-13 is tracked in `.clinerules/05-diagnostics-and-console.md`.
 
 ## Host side
 
