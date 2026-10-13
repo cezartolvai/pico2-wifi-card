@@ -10,8 +10,8 @@ your NIC     L2 bridge      your home network
              one MAC        one lease, from your router
 ```
 
-**Target: a network card, not a router.** Recorded in
-`.clinerules/00-requirements-baseline.md` ("Decizii consemnate", 2026-10-09).
+**Target: a network card, not a router.** Recorded in the requirements decision of
+2026-10-09: the host must sit directly on the Wi-Fi network's own network.
 
 **`src/` now holds both data paths, and `src/config.h` picks one at build time.**
 `BRIDGE_L2_BRIDGE` (in `src/config.h`, default `0`) picks which data path is compiled:
@@ -59,13 +59,13 @@ runs the L2 build (`-DBRIDGE_L2_BRIDGE=1`), so the first four rows below are rea
 "In code" means the source exists and the build is clean. It does **not** mean validated.
 Measured on hardware means a line was read out of a flashed board: the runs of 2026-10-10 and
 2026-10-12 on `build/pico2_wifi_card.uf2`, and the runs of 2026-10-13 on
-`build-l2/pico2_wifi_card.uf2`. Traceability and the open decisions are in
-`.clinerules/00-requirements-baseline.md`.
+`build-l2/pico2_wifi_card.uf2`. Traceability and the open decisions are the table above and
+the sections that follow.
 
-Traceability, open decisions and technical risks: `.clinerules/00-requirements-baseline.md`.
-The console specification to be met is `.clinerules/06-console-spec.md` (verbatim source text:
-`openrouter-console-design.md.bak`). Closing these gaps means changing `src/`, not rewording
-the requirements.
+Traceability, open decisions and technical risks: the requirements table above and
+"Closing the gap" below. The console specification to be met is
+`openrouter-console-design.md.bak` (the verbatim source text kept in this repo). Closing these
+gaps means changing `src/`, not rewording the requirements.
 
 ## Closing the gap: what the bridge needs, checked against the vendored SDK
 
@@ -144,8 +144,8 @@ cmake -S . -B build-l2 -G Ninja -DPICO_SDK_PATH=$PWD/.pico-sdk -DBRIDGE_L2_BRIDG
 ninja -C build-l2
 ```
 
-`build-usbonly` is the artifact for step 5 of the debugging order in
-`.clinerules/03-build-and-test.md`: if DHCP works with that image, the USB path is fine and
+`build-usbonly` is the artifact for the bisection step listed under
+"Scratch build directories": if DHCP works with that image, the USB path is fine and
 the fault is on the cyw43 / lwIP timing side. Neither variant has been flashed.
 
 `build-l2` is the transparent bridge the requirements ask for. It builds clean and is separate
@@ -153,14 +153,14 @@ from the reference image at the symbol level (`build-l2` has `bridge_l2_usb_inpu
 `bridge_l2_wifi_input` and zero `bridge_hook_*`, `bridge_nat_*`, `nat_*` or `dhserv_init`
 symbols; `build/` has the hooks and zero `bridge_l2_*`). **It has not been flashed**: flashing a
 `uf2` destroys the saved Wi-Fi profile on this board, and without a profile there is no uplink
-to bridge. See `.clinerules/03-build-and-test.md` ("`build-l2`").
+to bridge. See "Validating the L2 bridge" below.
 
 
 `build-selftest` is the image the recovery checks were run on. `BRIDGE_SELFTEST` is 0 in
 `src/config.h` and no shipped build turns it on: `build/` contains no `cmd_test`, no
 `bridge_led_*` readout and no `test` string at all, and on the board the reference image answers
 `test` with `[!] unknown command "test"`. See
-`.clinerules/03-build-and-test.md` ("Validarea diagnosticelor fără rețea").
+"Diagnostics measured without a network" below.
 
 
 
@@ -215,7 +215,7 @@ programmed) did not appear in any window tested. The hypothesis remains the most
 explanation of what was seen that morning; **the cause is still unconfirmed**. What changed in
 code regardless: `settings_save()` now holds interrupts off across the whole erase+program and
 reads the sector back before reporting success, so `save` can fail and says so.
-Analysis: `.clinerules/05-diagnostics-and-console.md`, "Fereastra decisivă a fost rulată".
+Analysis: the section "Validating the L2 bridge" above, "The decisive window was run".
 
 **Not implemented, and worth deciding:** a dual-slot (A/B) settings record. With four windows
 tested and the sector valid in all of them, the interrupt guard is the only real defence; an A/B
@@ -333,7 +333,7 @@ RECOVERED from an lwIP assert: pbuf_free: p->ref > 0 at 0x10007ff7
 between two consecutive `stats:` reads with no other cause; on the fixed image it stayed `0`
 through the whole soak. `nat_snat()` fails on a full NAT table, on a protocol with no port to
 key on, and on a truncated transport header — all reachable from ordinary host traffic, so this
-was not a corner case. The rule now written into `.clinerules/02-coding-standards.md`: a
+was not a corner case. The rule that came out of it, and the one `src/nat.c` follows: a
 `netif->output` installed by `ip4_forward()` must not free the pbuf on any path.
 
 `stats:` now carries `wdrop` (`bridge_stats.wifi_drop`), the counter a NAT-table exhaustion
@@ -420,7 +420,7 @@ consequence of the L3 + NAT design that the requirement says must go away.
 > 4 kB sector. **Closed 2026-10-12:** the record was moved to flash offset `0x3f0000`, sixteen
 > sectors below the top of the chip, out of reach of the erase that accompanies an RP2350
 > `.uf2` load, and it survived reflashes since. A separate, unexplained loss of the record on
-> 2026-10-13 is tracked in `.clinerules/05-diagnostics-and-console.md`.
+> 2026-10-13 is tracked under "Validating the L2 bridge" above.
 
 ## Host side
 
@@ -434,8 +434,7 @@ take a lease automatically.
 > The earlier signature (`RX: 0 packets`, `NETDEV WATCHDOG`, `no lease`) had a cause:
 > `bridge_checksum_fixup()` wrote a zero IP header checksum into every frame lwIP built
 > itself, so the host accepted the bytes and discarded the frames. See
-> `03-build-and-test.md` in `.clinerules/` for the trace that proved it and for
-> `scripts/frame_decode.py`, which re-checks it frame by frame.
+> "The bridged path under load" and `scripts/frame_decode.py`, which re-checks it frame by frame.
 
 
 * **Linux** - NetworkManager or systemd-networkd usually just picks it up. By
@@ -487,10 +486,10 @@ See `src/dhcp_notes.md` for why the DHCP server's replies need the route hook.
 * `CFG_TUD_NCM_*` and the lwIP pools in `src/lwipopts.h` are sized for light
   browsing, not for saturating a fast link.
 * Several items above are deviations from the requirements reference (NAT and the private
-  subnet, IPv4-only). They are tracked as unmet requirements in
-  `.clinerules/00-requirements-baseline.md`. The console, the watchdog, the hard-fault handler,
+  subnet, IPv4-only). They are tracked as unmet requirements in the requirements table at the
+  top of this file. The console, the watchdog, the hard-fault handler,
   the lwIP-assert report and the five LED patterns are not in that list: they exist in `src/`
-  and were measured on hardware (see `.clinerules/05-diagnostics-and-console.md`). The Wi-Fi
+  and were measured on hardware (see "Console" and "Diagnostics measured without a network"). The Wi-Fi
   side is validated too: the station associates with a real WPA2 access point, takes a lease
   from the router, and bridged traffic crosses the bridge under load (see
   "The bridged path under load"). Profile persistence across a `.uf2` reflash was measured

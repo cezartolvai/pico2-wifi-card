@@ -2,7 +2,8 @@
  * diagnostics.h - watchdog, hard fault, and the crash record that survives
  * the reset they cause.
  *
- * Implements the "Recuperare automată" section of .clinerules/06-console-spec.md:
+ * Implements the automatic-recovery part of the console specification
+ * (openrouter-console-design.md.bak):
  * a hardware watchdog resets a firmware that stopped serving the main loop, a
  * hard-fault handler records the faulting address, and the bridge counters from
  * just before the crash are kept in RAM that crt0 does not zero, so the board

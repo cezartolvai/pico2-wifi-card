@@ -2,11 +2,11 @@
 """OCR the requirements reference image and print what it actually says.
 
 The requirements reference for this product is openrouter-banana2-rpi-pico.png.
-The rules say that image defines what the adapter must do, so the transcription
-in .clinerules/00-requirements-baseline.md must be checkable against the image
-itself instead of trusted. This script is how that check is made: it upscales
-the image, runs tesseract over it in two page-segmentation modes, and prints
-both readings so a human can tell an OCR artefact from a real label.
+That image defines what the adapter must do, so the transcription of it kept in
+this repo's README must be checkable against the image itself instead of
+trusted. This script is how that check is made: it upscales the image, runs
+tesseract over it in two page-segmentation modes, and prints both readings so a
+human can tell an OCR artefact from a real label.
 
 Usage:  python3 scripts/ocr_reference.py [image.png]
 Needs:  tesseract on PATH, Pillow.

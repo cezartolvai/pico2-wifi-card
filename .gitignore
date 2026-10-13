@@ -1,5 +1,4 @@
-# Repo-ul este git-managed (ramură main).
-# (vezi .clinerules/04-security.md - credențialele nu se comită)
+# Repo-ul este git-managed (ramură main). Credențialele nu se comită.
 
 build/
 # Directoare de build secundare, folosite pentru verificări (build-usbonly,
@@ -25,3 +24,6 @@ credentials.cmake
 bridge-credentials.cmake
 *.local.cmake
 .env
+
+# Regulile locale ale agentului (documentația de lucru Cline). Rămân pe disc, nu se publică.
+.clinerules/

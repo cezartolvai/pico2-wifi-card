@@ -4,8 +4,8 @@
 # BRIDGE_NAT_TABLE_SIZE is 24 (src/config.h), so this opens far more concurrent
 # flows than the table can hold.  That is the only way to reach the nat_snat()
 # failure path in bridge_nat_output() from ordinary host traffic, which is the
-# path that used to double-free the forwarded pbuf (see .clinerules/02-coding-standards.md,
-# "Double-free in the bridge path").
+# path that used to double-free the forwarded pbuf (see README.md,
+# "The bridged path under load" - the double-free and its proof).
 #
 # Run alongside a debug-console watcher:
 #   python3 -u scripts/console_watch.py /dev/ttyACM1 240 > /tmp/soak.log &

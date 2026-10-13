@@ -67,7 +67,7 @@
  *
  * It is 0 here so that build/ stays the reference image until the L2 path has
  * been validated on hardware; -DBRIDGE_L2_BRIDGE=1 builds the bridge itself.
- * See .clinerules/00-requirements-baseline.md (R2, R3, R4, R5). */
+ * See the requirements reference openrouter-banana2-rpi-pico.png (R2, R3, R4, R5). */
 #ifndef BRIDGE_L2_BRIDGE
 #define BRIDGE_L2_BRIDGE        0
 #endif

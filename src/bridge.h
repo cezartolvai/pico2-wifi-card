@@ -33,9 +33,10 @@ typedef struct {
     uint32_t nat_new;       /* mappings created                          */
     uint32_t nat_expired;   /* mappings reaped                           */
 
-    /* Fields the stats: line of the debug console reports (table 2 of
-     * .clinerules/06-console-spec.md).  forwarded counts decisions, not
-     * frames, so the frames that really crossed the bridge are counted here. */
+    /* Fields the stats: line of the debug console reports (table 2 of the
+     * console specification, openrouter-console-design.md.bak).  forwarded
+     * counts decisions, not frames, so the frames that really crossed the
+     * bridge are counted here. */
     uint32_t to_wifi;       /* ->wifi: host->Wi-Fi frames transmitted    */
     uint32_t refl;          /* host's own frames bounced back by the AP  */
     uint32_t poolfail;      /* lwIP's pbuf pool was momentarily empty    */
@@ -96,8 +97,9 @@ uint32_t bridge_led_tick(void);
 bool bridge_led_force(const char *pattern, uint32_t seconds);
 #endif /* BRIDGE_SELFTEST guard is applied at the use site in console.c */
 
-/* The periodic line of the debug console, formatted exactly as table 2 of
- * .clinerules/06-console-spec.md.  Returns the number of characters written. */
+/* The periodic line of the debug console, formatted exactly as table 2 of the
+ * console specification (openrouter-console-design.md.bak).  Returns the number
+ * of characters written. */
 size_t bridge_format_stats(char *buf, size_t len);
 
 /* Recompute the IPv4 header checksum and the TCP/UDP/ICMP checksum of the

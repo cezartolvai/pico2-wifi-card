@@ -2,7 +2,7 @@
  * console.h - the management console (first CDC-ACM function, /dev/ttyACM0)
  * and the debug stream (second CDC-ACM function, /dev/ttyACM1).
  *
- * See .clinerules/06-console-spec.md for the specification this implements.
+ * See openrouter-console-design.md.bak for the specification this implements.
  * ------------------------------------------------------------------------ */
 #ifndef PICO2_WIFI_CARD_CONSOLE_H
 #define PICO2_WIFI_CARD_CONSOLE_H

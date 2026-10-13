@@ -2,7 +2,8 @@
  * console.c - management console (/dev/ttyACM0), debug stream (/dev/ttyACM1)
  * and the runtime settings those two can change.
  *
- * Implements .clinerules/06-console-spec.md.  Nothing here blocks: when the
+ * Implements the console specification (openrouter-console-design.md.bak).
+ * Nothing here blocks: when the
  * CDC-ACM functions are not enumerated yet every routine does nothing, so the
  * bridge keeps running and UART0 stays usable as a mirror.
  * ------------------------------------------------------------------------ */

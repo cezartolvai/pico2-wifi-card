@@ -6,7 +6,7 @@
 # ACEEAȘI sesiune. Rulate pe rând se citesc greșit: o interfață cu MAC-ul stației dar fără
 # lease nu spune nimic despre punte, iar un ping care merge nu spune nimic despre MAC.
 #
-# Criteriile (.clinerules/03-build-and-test.md, „Criteriul de acceptare”):
+# Criteriile (README.md, „Validating the L2 bridge”):
 #   1. MAC-ul interfeței USB == MAC-ul stației CYW43 (rândul `mac:` de pe consolă)
 #   2. `wifi IP: (bridge: none)` - puntea nu deține adresă
 #   3. `host IPv4:` = o adresă din plasa routerului, nu 172.28.0.x
@@ -152,6 +152,6 @@ sleep 2
 timeout 25 python3 scripts/console_watch.py "$DEBUG_TTY" 20 2>&1 | tail -8
 
 echo "=== verdict ==="
-echo "Criteriile de acceptare sunt în .clinerules/03-build-and-test.md."
+echo "Criteriile de acceptare sunt în README.md, secțiunea „Validating the L2 bridge”."
 echo "Fiecare rând de mai sus se raportează cu cifrele citite, nu cu așteptarea."
 
